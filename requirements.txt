@@ -1,0 +1,6 @@
+langchain-mistralai==0.2.11
+fastapi[standard]==0.116.1
+gradio==5.38.0
+openpyxl==3.1.5
+xlrd>=2.0.1
+pandas==2.3.0
