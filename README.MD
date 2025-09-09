@@ -16,13 +16,13 @@
 - `requirements.txt` : python requirements
 
 ## Run instructions
-1. Create venv in project directory `python3 -m venv venv`
+1. Create venv in project directory `python -m venv venv`
 2. Activate venv `venv/Scripts/activate` (windows) or `source venv/bin/activate` (linux)
 3. Install requirements.txt `pip install -r requirements.txt`
 4. Run application (run in project directory)
     - FastAPI: `fastapi run main.py`
     - Uvicorn: `uvicorn main:app`
-5. Open Web-Interface at http://0.0.0.0:8000
+5. Open Web-Interface at http://localhost:8000/
 
 ## Implemented functionality
 
