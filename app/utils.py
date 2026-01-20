@@ -66,10 +66,17 @@ def create_pcb_model(params: dict[str, str]) -> ChatMistralAI:
     Returns:
         ChatMistralAI: An instance of the ChatMistralAI model configured for PCB characteristics parsing.
     """
+    api_key = (params.get("api_key") or "").strip()
+    if not api_key:
+        raise ValueError(
+            "Mistral API key is empty. Set environment variable `MISTRAL_API_KEY` "
+            "before starting the app."
+        )
+
     llm = ChatMistralAI(
         model="mistral-medium-latest",
         temperature=0.1,
-        api_key=params["api_key"],
+        api_key=api_key,
     )
     return llm.with_structured_output(PCBCharacteristics)
 
