@@ -17,6 +17,27 @@
 Структура словарей: {текстовое_значение: item_id}
 """
 from typing import Dict, Optional
+import os
+
+def _try_get_db():
+    """
+    Lazy import to avoid hard dependency on SQLAlchemy when DB mode is not used.
+    Returns a DbDictionaries instance or None.
+    """
+    if (os.getenv("USE_DB_DICTIONARIES", "1").strip() == "0"):
+        return None
+    if not (os.getenv("DICTIONARIES_DB_URL") or "").strip():
+        return None
+    try:
+        from .db_dictionaries import get_db_dictionaries  # type: ignore
+        return get_db_dictionaries()
+    except Exception:
+        # If running as script from app/ or SQLAlchemy is not installed yet
+        try:
+            from db_dictionaries import get_db_dictionaries  # type: ignore
+            return get_db_dictionaries()
+        except Exception:
+            return None
 
 # Справочник 56: Materials (Материал основания платы)
 # IBLOCK_ID = 56
@@ -109,7 +130,6 @@ EDGE_PLATING_DICT: Dict[str, int] = {
     # Нужно уточнить реальные ID
 }
 
-
 def normalize_text(text: str) -> str:
     """
     Нормализует текст для поиска в справочниках.
@@ -164,16 +184,25 @@ def find_item_id(
 
 def get_material_id(material_text: str) -> Optional[int]:
     """Получить ID материала из справочника 56"""
+    db = _try_get_db()
+    if db:
+        return db.find_item_id(56, material_text)
     return find_item_id(material_text, MATERIALS_DICT)
 
 
 def get_finish_type_id(finish_text: str) -> Optional[int]:
     """Получить ID типа финишного покрытия из справочника 74"""
+    db = _try_get_db()
+    if db:
+        return db.find_item_id(74, finish_text)
     return find_item_id(finish_text, FINISH_TYPE_DICT)
 
 
 def get_layers_id(layers_text: str) -> Optional[int]:
     """Получить ID количества слоев из справочника 54"""
+    db = _try_get_db()
+    if db:
+        return db.find_item_id(54, str(layers_text))
     # Пытаемся извлечь число из текста
     import re
     numbers = re.findall(r'\d+', str(layers_text))
@@ -185,39 +214,63 @@ def get_layers_id(layers_text: str) -> Optional[int]:
 
 def get_copper_thickness_id(thickness_text: str) -> Optional[int]:
     """Получить ID толщины меди из справочника 62"""
+    db = _try_get_db()
+    if db:
+        return db.find_item_id(62, thickness_text)
     return find_item_id(thickness_text, COPPER_THICKNESS_DICT)
 
 
 def get_order_unit_id(unit_text: str) -> Optional[int]:
     """Получить ID единицы заказа из справочника 50"""
+    db = _try_get_db()
+    if db:
+        return db.find_item_id(50, unit_text)
     return find_item_id(unit_text, ORDER_UNIT_DICT)
 
 
 def get_pcb_type_id(pcb_type_text: str) -> Optional[int]:
     """Получить ID типа платы из справочника 52"""
+    db = _try_get_db()
+    if db:
+        return db.find_item_id(52, pcb_type_text)
     return find_item_id(pcb_type_text, PCB_TYPE_DICT)
 
 
 def get_peelable_sm_id(peelable_text: str) -> Optional[int]:
     """Получить ID пилинг-маски из справочника 86"""
+    db = _try_get_db()
+    if db:
+        return db.find_item_id(86, peelable_text)
     return find_item_id(peelable_text, PEELABLE_SM_DICT)
 
 
 def get_production_unit_id(unit_text: str) -> Optional[int]:
     """Получить ID производственного участка из справочника 160"""
+    db = _try_get_db()
+    if db:
+        return db.find_item_id(160, unit_text)
     return find_item_id(unit_text, PRODUCTION_UNIT_DICT)
 
 
 def get_solder_mask_color_id(color_text: str) -> Optional[int]:
     """Получить ID цвета паяльной маски из справочника 64"""
+    db = _try_get_db()
+    if db:
+        return db.find_item_id(64, color_text)
     return find_item_id(color_text, SOLDER_MASK_COLOR_DICT)
 
 
 def get_silkscreen_color_id(color_text: str) -> Optional[int]:
     """Получить ID цвета маркировки из справочника 66"""
+    db = _try_get_db()
+    if db:
+        return db.find_item_id(66, color_text)
     return find_item_id(color_text, SILKSCREEN_COLOR_DICT)
 
 
 def get_edge_plating_id(plating_text: str) -> Optional[int]:
     """Получить ID металлизации края из справочника 72"""
+    db = _try_get_db()
+    if db:
+        return db.find_item_id(72, plating_text)
     return find_item_id(plating_text, EDGE_PLATING_DICT)

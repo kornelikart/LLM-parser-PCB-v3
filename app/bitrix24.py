@@ -8,9 +8,11 @@ from typing import Dict, Any, Optional
 try:
     from logger import setup_logger
     import bitrix24_dictionaries as dicts
+    from config import bitrix24_defaults
 except:
     from .logger import setup_logger
     from . import bitrix24_dictionaries as dicts
+    from .config import bitrix24_defaults
 
 logger = setup_logger(level=logging.INFO)
 
@@ -198,21 +200,25 @@ def map_pcb_to_bitrix24_fields(pcb_data: Dict[str, Any]) -> Dict[str, Any]:
         else:
             logger.warning(f"Не найден ID для толщины меди: '{pcb_data['foil_thickness']}'")
     
-    # UF_CRM_24_1707838030: Order unit (справочник 50) - обязательное, но нет в PCB данных
-    # Можно установить значение по умолчанию или попросить пользователя указать
-    # Пока пропускаем, но нужно будет добавить
+    # UF_CRM_24_1707838030: Order unit (справочник 50) - обязательное
+    # Используем значение по умолчанию из конфигурации
+    fields["ufCrm24_1707838030"] = bitrix24_defaults["order_unit_id"]
+    logger.debug(f"Order unit: используется значение по умолчанию {bitrix24_defaults['order_unit_id']}")
     
     # UF_CRM_24_1707838074: PCB type (справочник 52) - обязательное
-    # Можно попытаться определить по другим параметрам или установить значение по умолчанию
-    # Пока пропускаем, но нужно будет добавить
+    # Используем значение по умолчанию из конфигурации
+    fields["ufCrm24_1707838074"] = bitrix24_defaults["pcb_type_id"]
+    logger.debug(f"PCB type: используется значение по умолчанию {bitrix24_defaults['pcb_type_id']}")
     
     # UF_CRM_24_1707839629: Peelable SM (справочник 86) - обязательное
-    # Нет в PCB данных, нужно установить значение по умолчанию или пропустить
-    # Пока пропускаем
+    # Используем значение по умолчанию из конфигурации
+    fields["ufCrm24_1707839629"] = bitrix24_defaults["peelable_sm_id"]
+    logger.debug(f"Peelable SM: используется значение по умолчанию {bitrix24_defaults['peelable_sm_id']}")
     
     # UF_CRM_24_1707849863: Production Unit (справочник 160) - обязательное
-    # Нет в PCB данных, нужно установить значение по умолчанию
-    # Пока пропускаем
+    # Используем значение по умолчанию из конфигурации
+    fields["ufCrm24_1707849863"] = bitrix24_defaults["production_unit_id"]
+    logger.debug(f"Production Unit: используется значение по умолчанию {bitrix24_defaults['production_unit_id']}")
     
     # ========== ГЕОМЕТРИЧЕСКИЕ ПАРАМЕТРЫ (double) ==========
     
