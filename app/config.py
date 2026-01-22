@@ -13,7 +13,7 @@ except ImportError:
 # ⚠️ ВНИМАНИЕ: API ключ в коде - это небезопасно для продакшена!
 # Приоритет: переменная окружения > значение по умолчанию в коде
 # Для продакшена используйте переменные окружения или .env файл
-_DEFAULT_MISTRAL_API_KEY = "z2bE6jVqaj6u1JlweQ3w29uUIwvyp2XA"
+_DEFAULT_MISTRAL_API_KEY = "mistral_api_key"
 
 _env_api_key = os.getenv("MISTRAL_API_KEY", _DEFAULT_MISTRAL_API_KEY).strip()
 _bitrix24_webhook_url = os.getenv("BITRIX24_WEBHOOK_URL", "").strip()
