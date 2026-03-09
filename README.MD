@@ -860,13 +860,3 @@ WHERE param_id = 56 AND LOWER(REPLACE(item, '-', '')) LIKE '%fr4%';
 ## Лицензия
 
 См. файл LICENSE
-
-## Контакты
-
-Репозиторий: https://github.com/kornelikkk2/LLM-parser-PCB-v3
-
-## Благодарности
-
-- Mistral AI за предоставление языковой модели
-- Gradio за удобный веб-интерфейс
-- FastAPI за быстрый и современный фреймворк
