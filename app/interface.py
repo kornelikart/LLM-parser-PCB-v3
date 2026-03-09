@@ -15,6 +15,12 @@ except: # for running main.py
 logger = setup_logger()
 
 
+def _file_basename(file):
+    """Имя файла без расширения для сохранения результатов."""
+    path = getattr(file, "name", None) or str(file)
+    return path.rsplit(".", 1)[0] if "." in path else path
+
+
 def show_outputs():
     logger.info("Processing done")
     return gr.update(visible=True), gr.update(visible=True), \
@@ -31,40 +37,27 @@ _parsed_pcb_data = None
 
 def parse_excel_pcb(file):
     """
-    This function extracts data from a given Excel file, processes it
-    using a language model to extract PCB characteristics, and saves the results 
-    into CSV, Excel, and JSON formats.
-
-    Args:
-        file (file-like object): The Excel file to be parsed.
-
-    Returns:
-        tuple: A tuple containing:
-            - pd.DataFrame: A DataFrame with the parsed PCB characteristics.
-            - str: The name of CSV file.
-            - str: The name of Excel file.
-            - str: The name of JSON file.
-
-    Raises:
-        Exception: If an error occurs during the parsing process.
+    Извлекает данные из загруженного файла (Excel или Word), обрабатывает через LLM
+    для извлечения характеристик ПП и сохраняет результаты в CSV, Excel и JSON.
     """
     global _parsed_pcb_data
-    logger.info("Starting to parse Excel file for PCB characteristics: %s", file.name)
+    if isinstance(file, list) and file:
+        file = file[0]
+    logger.info("Starting to parse file for PCB characteristics: %s", getattr(file, "name", file))
     
     try:
-        excel_txt = utils.extract_excel_data(file)
-        logger.debug("Extracted Excel data text")
+        doc_txt = utils.extract_document_data(file)
+        logger.debug("Extracted document data")
 
         llm = utils.create_pcb_model(mistral_params)
         logger.debug("PCB model created successfully.")
 
-        parsed_dict = utils.process_excel_pcb(excel_txt, llm)
+        parsed_dict = utils.process_excel_pcb(doc_txt, llm)
         logger.debug("Parsed PCB dictionary: %s", parsed_dict)
         
-        # Сохраняем данные для отправки в Битрикс24
         _parsed_pcb_data = parsed_dict
 
-        fn = file.name.split(".")[0]
+        fn = _file_basename(file)
         path_ext = lambda ext: f"{fn}_pcb_parsed.{ext}"
         csv_path = path_ext("csv")
         xlsx_path = path_ext("xlsx")
@@ -111,7 +104,7 @@ def send_to_bitrix24():
     global _parsed_pcb_data
     
     if not _parsed_pcb_data:
-        return "Ошибка: Сначала необходимо распарсить Excel файл."
+        return "Ошибка: Сначала необходимо загрузить и распарсить файл (Excel или Word)."
     
     # Приоритет: webhook_url > token
     webhook_url = bitrix24_config.get("webhook_url", "").strip()
@@ -147,44 +140,68 @@ def send_to_bitrix24():
 def create_interface(title: str = "gradio app"):
     interface = gr.Blocks(title=title)
     with interface:
-        gr.Markdown("# LLM-Parser: Характеристики печатных плат")
-        
-        gr.Markdown("## Парсинг характеристик печатных плат из Excel файлов")
-        
-        # Информационное сообщение о возможных задержках
-        gr.Markdown("""
-        **Примечание:** Обработка может занять некоторое время из-за использования внешнего AI сервиса. 
-        При превышении лимитов запросов система автоматически повторит попытку.
-        """)
-        
-        excel_input = gr.File(label="Загрузить Excel файл", file_types=[".xlsx", ".xls"], height=160)
-        excel_process_btn = gr.Button(value="Парсить Excel данные", visible=False, variant="primary")
-        excel_parsed_reports = gr.DataFrame(label="Распарсенные характеристики печатных плат", 
-                                          show_copy_button=True, 
-                                          visible=False, min_width=10)
+        # Заголовок и краткое описание
+        gr.Markdown("## LLM-Parser: Характеристики печатных плат")
+        gr.Markdown(
+            "Инструмент для распознавания технических требований ПП из файлов Excel / Word "
+            "и формирования структурированных данных и заявки в Битрикс24."
+        )
+
         with gr.Row():
-            excel_download_csv = gr.File(label="Скачать как CSV", visible=False)
-            excel_download_xlsx = gr.File(label="Скачать как XLSX", visible=False)
-            excel_download_json = gr.File(label="Скачать как JSON", visible=False)
-        excel_download_bitrix24_json = gr.File(
-            label="Скачать JSON для Битрикс24", 
-            visible=False,
-            file_types=[".json"]
-        )
-        
-        # Интеграция с Битрикс24
-        gr.Markdown("---")
-        gr.Markdown("## Отправка в Битрикс24")
-        bitrix24_status = gr.Textbox(
-            label="Статус отправки",
-            visible=False,
-            interactive=False
-        )
-        bitrix24_send_btn = gr.Button(
-            value="Отправить в Битрикс24",
-            visible=False,
-            variant="secondary"
-        )
+            # Левая колонка: загрузка и запуск парсинга
+            with gr.Column(scale=1):
+                gr.Markdown("### Шаг 1. Загрузка файла")
+                gr.Markdown(
+                    "- **Поддерживаемые форматы**: `.xlsx`, `.xls`, `.docx`, `.doc`\n"
+                    "- Файлы формата Word могут быть в виде листа технических требований ПП "
+                    "на русском и/или английском языке."
+                )
+                excel_input = gr.File(
+                    label="Загрузить файл спецификации (Excel или Word)",
+                    file_types=["file"],
+                    height=140
+                )
+                excel_process_btn = gr.Button(
+                    value="Распознать характеристики",
+                    visible=False,
+                    variant="primary"
+                )
+                gr.Markdown(
+                    "_Обработка может занять некоторое время из-за обращения к внешнему AI-сервису Mistral._"
+                )
+
+                # Интеграция с Битрикс24 (кнопка и статус)
+                gr.Markdown("---")
+                gr.Markdown("### Шаг 3. Отправка в Битрикс24")
+                bitrix24_status = gr.Textbox(
+                    label="Статус отправки в Битрикс24",
+                    visible=False,
+                    interactive=False
+                )
+                bitrix24_send_btn = gr.Button(
+                    value="Отправить распознанные данные в Битрикс24",
+                    visible=False,
+                    variant="secondary"
+                )
+
+            # Правая колонка: результаты и выгрузки
+            with gr.Column(scale=2):
+                gr.Markdown("### Шаг 2. Результаты распознавания")
+                excel_parsed_reports = gr.DataFrame(
+                    label="Распознанные характеристики печатной платы",
+                    show_copy_button=True,
+                    visible=False,
+                    min_width=10
+                )
+                with gr.Row():
+                    excel_download_csv = gr.File(label="Скачать как CSV", visible=False)
+                    excel_download_xlsx = gr.File(label="Скачать как XLSX", visible=False)
+                    excel_download_json = gr.File(label="Скачать как JSON", visible=False)
+                excel_download_bitrix24_json = gr.File(
+                    label="Скачать JSON для Битрикс24",
+                    visible=False,
+                    file_types=[".json"]
+                )
 
         # Excel processing events
         excel_input.upload(lambda: gr.update(visible=True), None, excel_process_btn)

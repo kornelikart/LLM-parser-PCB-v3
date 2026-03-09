@@ -2,7 +2,7 @@ from langchain_mistralai import ChatMistralAI
 import pandas as pd
 import logging
 import time
-from typing import Optional
+from typing import Optional, Union
 try:    # for running interface.py
     from model import PCBCharacteristics
     from logger import setup_logger
@@ -11,6 +11,151 @@ except: # for running main.py
     from .logger import setup_logger
 
 logger = setup_logger(level=logging.INFO)
+
+
+def _get_file_path(file) -> str:
+    """Return path to file for reading. Supports path string or file-like with .name."""
+    if isinstance(file, str):
+        return file
+    if hasattr(file, "name"):
+        return file.name
+    return str(file)
+
+
+def extract_word_data(file) -> str:
+    """Извлекает текст из документа Word (.docx): параграфы и таблицы."""
+    logger.info("Извлечение данных из Word файла.")
+    path = _get_file_path(file)
+    try:
+        from docx import Document
+        doc = Document(path)
+        parts = []
+        for p in doc.paragraphs:
+            text = (p.text or "").strip()
+            if text:
+                parts.append(text)
+        for table in doc.tables:
+            rows_text = []
+            for row in table.rows:
+                cells = [(cell.text or "").strip().replace("\n", " ") for cell in row.cells]
+                if any(cells):
+                    rows_text.append("\t".join(cells))
+            if rows_text:
+                parts.append("\n".join(rows_text))
+        result = "\n\n".join(parts)
+        logger.info("Word: извлечено символов %s, слов %s", len(result), len(result.split()))
+        return result
+    except Exception as e:
+        logger.error("Ошибка чтения Word файла: %s", e)
+        raise e
+
+
+def _convert_doc_to_docx(doc_path: str, out_dir: str) -> str:
+    """Конвертирует .doc в .docx через LibreOffice или doc2docx. Возвращает путь к .docx."""
+    import os
+    import subprocess
+    import shutil
+    base = os.path.splitext(os.path.basename(doc_path))[0]
+    docx_path = os.path.join(out_dir, base + ".docx")
+    # 1) LibreOffice (если установлен)
+    soffice_candidates = [
+        os.path.expandvars(r"%ProgramFiles%\LibreOffice\program\soffice.exe"),
+        os.path.expandvars(r"%ProgramFiles(x86)%\LibreOffice\program\soffice.exe"),
+        "soffice",
+        "libreoffice",
+    ]
+    for soffice in soffice_candidates:
+        if soffice in ("soffice", "libreoffice"):
+            exe = shutil.which(soffice)
+            if not exe:
+                continue
+            soffice = exe
+        elif not os.path.isfile(soffice):
+            continue
+        try:
+            subprocess.run(
+                [
+                    soffice,
+                    "--headless",
+                    "--convert-to", "docx",
+                    "--outdir", out_dir,
+                    doc_path,
+                ],
+                check=True,
+                capture_output=True,
+                timeout=60,
+                creationflags=subprocess.CREATE_NO_WINDOW if hasattr(subprocess, "CREATE_NO_WINDOW") else 0,
+            )
+            if os.path.isfile(docx_path):
+                return docx_path
+        except (subprocess.CalledProcessError, FileNotFoundError, OSError, subprocess.TimeoutExpired) as e:
+            logger.debug("LibreOffice не сработал (%s): %s", soffice, e)
+            continue
+    # 2) doc2docx (требует установленный Word на Windows или LibreOffice)
+    try:
+        from doc2docx import convert
+        convert(doc_path, docx_path)
+        if os.path.isfile(docx_path):
+            return docx_path
+    except Exception as e:
+        logger.debug("doc2docx не сработал: %s", e)
+    raise RuntimeError(
+        "Не удалось конвертировать .doc в .docx. Установите LibreOffice "
+        "(https://www.libreoffice.org/) или сохраните документ как .docx в Word."
+    )
+
+
+def extract_word97_data(file) -> str:
+    """Извлекает текст из Word 97–2003 (.doc). Пробует Win32 COM (Word), затем конвертацию в .docx."""
+    import os
+    import sys
+    path = _get_file_path(file)
+    path = os.path.abspath(path)
+    logger.info("Извлечение данных из Word 97-2003 (.doc).")
+    if sys.platform == "win32":
+        try:
+            import win32com.client
+            word = win32com.client.Dispatch("Word.Application")
+            word.Visible = False
+            try:
+                doc = word.Documents.Open(path, ReadOnly=True)
+                try:
+                    text = doc.Content.Text
+                    if text and text.strip():
+                        logger.info("Word 97-2003: текст извлечён через MS Word (COM).")
+                        return text.strip()
+                finally:
+                    doc.Close(False)
+            finally:
+                word.Quit()
+        except Exception as e:
+            logger.debug("Извлечение .doc через Word COM не удалось: %s", e)
+    import shutil
+    import tempfile
+    tmpdir = tempfile.mkdtemp()
+    try:
+        doc_copy = os.path.join(tmpdir, "input.doc")
+        shutil.copy2(path, doc_copy)
+        docx_path = _convert_doc_to_docx(doc_copy, tmpdir)
+        return extract_word_data(docx_path)
+    finally:
+        shutil.rmtree(tmpdir, ignore_errors=True)
+
+
+def extract_document_data(file) -> str:
+    """Извлекает текст из Excel или Word по расширению файла."""
+    path = _get_file_path(file)
+    path_lower = path.lower()
+    if path_lower.endswith(".docx"):
+        return extract_word_data(file)
+    if path_lower.endswith(".doc"):
+        return extract_word97_data(file)
+    if path_lower.endswith((".xlsx", ".xls")):
+        return extract_excel_data(file)
+    raise ValueError(
+        "Неподдерживаемый формат. Используйте файл .xlsx, .xls, .docx или .doc (Лист технических требований ПП)."
+    )
+
 
 def extract_excel_data(file) -> str:
     """Extracts data from an Excel file and converts it to a string.
@@ -94,8 +239,25 @@ def process_excel_pcb_with_retry(excel_txt: str, llm_parser: ChatMistralAI, max_
         dict: A dictionary containing the processed PCB characteristics, or None if all retries failed.
     """
     messages = [
-        ("system", "You are an experienced PCB engineer. Extract PCB characteristics from the provided data including: company name, board name, quantity, base material, foil thickness, layer count, board size, and panelization. If any information is missing, use empty string or 0 as appropriate."),
-        ("human", excel_txt)
+        (
+            "system",
+            "You are an experienced PCB engineer. Extract PCB characteristics from the provided data. "
+            "Data may come from Excel or from a Word 'Technical Requirements Sheet PCB' / 'Лист технических требований ПП' (Russian/English). "
+            "Extract at least the following fields into the structured PCBCharacteristics object: "
+            "company_name (company name), board_name (board name / Identification / Обозначение), quantity (boards quantity, if present), "
+            "base_material (Base material / Тип материала), "
+            "board_thickness (finished PCB thickness with tolerance, from 'Finished thickness with tolerance, mm' / 'Толщина с допуском, мм'), "
+            "foil_thickness (from CU foil thickness + electroplating / Толщина медной фольги / Thickness CU), "
+            "layer_count (from Layer PCB / Слои топологии - count signal layers like Layer 1, Layer 2, etc.), "
+            "board_size (Size with tolerance / (Длина x ширина) with tolerance), "
+            "coverage_type (surface finish, from 'Surface Finish' / 'Финишное покрытие платы'), "
+            "solder_mask_colour (solder mask colour from Material, color / Материал, цвет), "
+            "solder_mark_colour (marking / legend colour), "
+            "electrical_testing (information about electrical test / электроконтроль), "
+            "panelization (panel / panelization info), edge_plating, contour_treatment and any other PCB fields defined in the schema. "
+            "If any information is missing, use empty string or 0 as appropriate."
+        ),
+        ("human", excel_txt),
     ]
     
     for attempt in range(max_retries):

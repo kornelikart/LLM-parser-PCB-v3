@@ -147,19 +147,23 @@ def map_pcb_to_bitrix24_fields(pcb_data: Dict[str, Any]) -> Dict[str, Any]:
     # Rev. (обязательное)
     fields["ufCrm24_1709799420584"] = ""
     
-    # Board Thickness (обязательное double) - по умолчанию 1.6
+    # Board Thickness (обязательное double) - по умолчанию 1.6 мм
+    # 1) Пытаемся взять из pcb_data["board_thickness"] (Finished thickness with tolerance, mm)
+    # 2) Если нет/не получается — оставляем значение по умолчанию 1.6
     board_thickness = 1.6
-    if pcb_data.get("board_size"):
-        try:
-            parts = pcb_data["board_size"].replace("x", " ").replace("X", " ").split()
-            for part in parts:
-                if "." in part:
-                    thickness = float(part)
-                    if 0.1 <= thickness <= 10:
-                        board_thickness = thickness
-                        break
-        except:
-            pass
+    thickness_src = pcb_data.get("board_thickness") or ""
+    if thickness_src:
+        import re
+        # Заменяем запятую на точку и вытаскиваем первое число
+        cleaned = thickness_src.replace(",", ".")
+        numbers = re.findall(r"\d+(\.\d+)?", cleaned)
+        if numbers:
+            try:
+                value = float(numbers[0])
+                if 0.1 <= value <= 10:
+                    board_thickness = value
+            except ValueError:
+                pass
     fields["ufCrm24_1708374728464"] = board_thickness
     
     # ========== ОБЯЗАТЕЛЬНЫЕ ПОЛЯ ТИПА IBLOCK_ELEMENT ==========
@@ -222,7 +226,7 @@ def map_pcb_to_bitrix24_fields(pcb_data: Dict[str, Any]) -> Dict[str, Any]:
     
     # ========== ГЕОМЕТРИЧЕСКИЕ ПАРАМЕТРЫ (double) ==========
     
-    # Парсинг размеров платы
+    # Парсинг размеров платы (Board Length / Board Width), толщина здесь больше не изменяется
     if pcb_data.get("board_size"):
         try:
             size_str = pcb_data["board_size"].replace("x", " ").replace("X", " ").replace("×", " ")
@@ -230,9 +234,6 @@ def map_pcb_to_bitrix24_fields(pcb_data: Dict[str, Any]) -> Dict[str, Any]:
             if len(parts) >= 2:
                 fields["ufCrm24_1708353384301"] = parts[0]  # Board Length (mm)
                 fields["ufCrm24_1708353402068"] = parts[1]  # Board Width (mm)
-                if len(parts) >= 3:
-                    if 0.1 <= parts[2] <= 10:
-                        fields["ufCrm24_1708374728464"] = parts[2]  # Board Thickness
         except Exception as e:
             logger.debug(f"Не удалось распарсить размер платы: {e}")
     

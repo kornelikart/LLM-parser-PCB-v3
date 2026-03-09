@@ -15,7 +15,12 @@ class PCBCharacteristics(BaseModel):
         default="",
         description="Материал основания печатной платы"
     )
-    
+
+    board_thickness: str = Field(
+        default="",
+        description="Толщина печатной платы"
+    )
+
     foil_thickness: str = Field(
         default="",
         description="Толщина фольги"
