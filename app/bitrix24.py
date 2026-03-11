@@ -2,6 +2,7 @@
 Модуль для интеграции с Битрикс24 REST API.
 Отправка данных о печатных платах в смарт-процесс Битрикс24.
 """
+import re
 import httpx
 import logging
 from typing import Dict, Any, Optional
@@ -126,9 +127,11 @@ def map_pcb_to_bitrix24_fields(pcb_data: Dict[str, Any]) -> Dict[str, Any]:
     
     # ========== ОБЯЗАТЕЛЬНЫЕ СТРОКОВЫЕ ПОЛЯ ==========
     
-    # OEM PN (обязательное)
-    if pcb_data.get("board_name"):
-        fields["ufCrm24_1709799376061"] = pcb_data["board_name"]
+    # OEM PN (обязательное) - без него не отправляем данные
+    board_name = (pcb_data.get("board_name") or "").strip()
+    if not board_name:
+        raise ValueError("Не задано обязательное поле 'board_name' (OEM PN) для заявки в Битрикс24.")
+    fields["ufCrm24_1709799376061"] = board_name
     
     # OEM Description (обязательное) - комбинируем несколько полей
     description_parts = []
@@ -138,32 +141,39 @@ def map_pcb_to_bitrix24_fields(pcb_data: Dict[str, Any]) -> Dict[str, Any]:
         description_parts.append(f"Layers: {pcb_data['layer_count']}")
     if pcb_data.get("coverage_type"):
         description_parts.append(f"Finish: {pcb_data['coverage_type']}")
-    if description_parts:
-        fields["ufCrm24_1709799393816"] = ", ".join(description_parts)
-    else:
-        # Обязательное поле, должно быть заполнено
-        fields["ufCrm24_1709799393816"] = "PCB"
+    if not description_parts:
+        raise ValueError(
+            "Не удалось сформировать обязательное поле OEM Description для Битрикс24. "
+            "Нужно как минимум одно из полей: base_material, layer_count, coverage_type."
+        )
+    fields["ufCrm24_1709799393816"] = ", ".join(description_parts)
     
     # Rev. (обязательное)
     fields["ufCrm24_1709799420584"] = ""
     
-    # Board Thickness (обязательное double) - по умолчанию 1.6 мм
-    # 1) Пытаемся взять из pcb_data["board_thickness"] (Finished thickness with tolerance, mm)
-    # 2) Если нет/не получается — оставляем значение по умолчанию 1.6
-    board_thickness = 1.6
-    thickness_src = pcb_data.get("board_thickness") or ""
+    # Board Thickness (обязательное double) - без значения не отправляем данные
+    # Берём из pcb_data["board_thickness"] (Finished thickness with tolerance, mm)
+    board_thickness: Optional[float] = None
+    thickness_src = (pcb_data.get("board_thickness") or "").strip()
     if thickness_src:
-        import re
         # Заменяем запятую на точку и вытаскиваем первое число
         cleaned = thickness_src.replace(",", ".")
-        numbers = re.findall(r"\d+(\.\d+)?", cleaned)
+        # Берём первое число целое или с точкой, без захватывающих групп,
+        # чтобы re.findall возвращал полное совпадение, а не только дробную часть.
+        numbers = re.findall(r"\d+(?:\.\d+)?", cleaned)
         if numbers:
             try:
                 value = float(numbers[0])
                 if 0.1 <= value <= 10:
                     board_thickness = value
             except ValueError:
-                pass
+                board_thickness = None
+
+    if board_thickness is None:
+        raise ValueError(
+            "Не удалось корректно определить обязательное поле 'board_thickness' "
+            "(толщина платы). Проверьте исходный документ."
+        )
     fields["ufCrm24_1708374728464"] = board_thickness
     
     # ========== ОБЯЗАТЕЛЬНЫЕ ПОЛЯ ТИПА IBLOCK_ELEMENT ==========
@@ -206,58 +216,73 @@ def map_pcb_to_bitrix24_fields(pcb_data: Dict[str, Any]) -> Dict[str, Any]:
     
     # UF_CRM_24_1707838030: Order unit (справочник 50) - обязательное
     # Используем значение по умолчанию из конфигурации
-    fields["ufCrm24_1707838030"] = bitrix24_defaults["order_unit_id"]
-    logger.debug(f"Order unit: используется значение по умолчанию {bitrix24_defaults['order_unit_id']}")
+   # fields["ufCrm24_1707838030"] = bitrix24_defaults["order_unit_id"]
+   # logger.debug(f"Order unit: используется значение по умолчанию {bitrix24_defaults['order_unit_id']}")
     
     # UF_CRM_24_1707838074: PCB type (справочник 52) - обязательное
     # Используем значение по умолчанию из конфигурации
-    fields["ufCrm24_1707838074"] = bitrix24_defaults["pcb_type_id"]
-    logger.debug(f"PCB type: используется значение по умолчанию {bitrix24_defaults['pcb_type_id']}")
+   # fields["ufCrm24_1707838074"] = bitrix24_defaults["pcb_type_id"]
+   # logger.debug(f"PCB type: используется значение по умолчанию {bitrix24_defaults['pcb_type_id']}")
     
     # UF_CRM_24_1707839629: Peelable SM (справочник 86) - обязательное
     # Используем значение по умолчанию из конфигурации
-    fields["ufCrm24_1707839629"] = bitrix24_defaults["peelable_sm_id"]
-    logger.debug(f"Peelable SM: используется значение по умолчанию {bitrix24_defaults['peelable_sm_id']}")
+  #  fields["ufCrm24_1707839629"] = bitrix24_defaults["peelable_sm_id"]
+  #  logger.debug(f"Peelable SM: используется значение по умолчанию {bitrix24_defaults['peelable_sm_id']}")
     
     # UF_CRM_24_1707849863: Production Unit (справочник 160) - обязательное
     # Используем значение по умолчанию из конфигурации
-    fields["ufCrm24_1707849863"] = bitrix24_defaults["production_unit_id"]
-    logger.debug(f"Production Unit: используется значение по умолчанию {bitrix24_defaults['production_unit_id']}")
+  #  fields["ufCrm24_1707849863"] = bitrix24_defaults["production_unit_id"]
+  #  logger.debug(f"Production Unit: используется значение по умолчанию {bitrix24_defaults['production_unit_id']}")
     
     # ========== ГЕОМЕТРИЧЕСКИЕ ПАРАМЕТРЫ (double) ==========
     
-    # Парсинг размеров платы (Board Length / Board Width), толщина здесь больше не изменяется
+    # Парсинг размеров платы (Board Length / Board Width) — извлекаем числа из "(253.0 x 140.0) ± 0.2 mm"
     if pcb_data.get("board_size"):
         try:
-            size_str = pcb_data["board_size"].replace("x", " ").replace("X", " ").replace("×", " ")
-            parts = [float(p) for p in size_str.split() if p.replace(".", "").isdigit()]
-            if len(parts) >= 2:
-                fields["ufCrm24_1708353384301"] = parts[0]  # Board Length (mm)
-                fields["ufCrm24_1708353402068"] = parts[1]  # Board Width (mm)
+            size_str = (pcb_data["board_size"] or "").replace(",", ".")
+            numbers = re.findall(r"\d+(?:\.\d+)?", size_str)
+            parts = [float(n) for n in numbers if n]
+            # Берём первые два числа в разумном диапазоне для мм (0.5–2000), чтобы отсечь допуск 0.2
+            valid = [p for p in parts if 0.5 <= p <= 2000]
+            if len(valid) >= 2:
+                fields["ufCrm24_1708353384301"] = valid[0]  # Board Length (mm)
+                fields["ufCrm24_1708353402068"] = valid[1]  # Board Width (mm)
         except Exception as e:
             logger.debug(f"Не удалось распарсить размер платы: {e}")
     
-    # Парсинг панелизации
+    # Парсинг панелизации — так же по числам
     if pcb_data.get("panelization"):
         try:
-            panel_str = pcb_data["panelization"].replace("x", " ").replace("X", " ").replace("×", " ")
-            parts = [float(p) for p in panel_str.split() if p.replace(".", "").isdigit()]
-            if len(parts) >= 2:
-                fields["ufCrm24_1708375852081"] = parts[0]  # Panel Length (mm)
-                fields["ufCrm24_1708375871512"] = parts[1]  # Panel Width (mm)
+            panel_str = (pcb_data["panelization"] or "").replace(",", ".")
+            numbers = re.findall(r"\d+(?:\.\d+)?", panel_str)
+            parts = [float(n) for n in numbers if n]
+            valid = [p for p in parts if 0.5 <= p <= 2000]
+            if len(valid) >= 2:
+                fields["ufCrm24_1708375852081"] = valid[0]  # Panel Length (mm)
+                fields["ufCrm24_1708375871512"] = valid[1]  # Panel Width (mm)
         except Exception as e:
             logger.debug(f"Не удалось распарсить панелизацию: {e}")
     
     # ========== ДОПОЛНИТЕЛЬНЫЕ ПОЛЯ ==========
     
-    # UF_CRM_24_*: Solder Mask Color (справочник 64)
-    if pcb_data.get("solder_mask_colour"):
+    # Solder Mask Color (справочник 64). Задайте код поля из Битрикс24, иначе значение не отправляется.
+    SOLDER_MASK_FIELD_CODE: Optional[str] = None  # например "ufCrm24_1707839XXX" — замените на реальный
+    if pcb_data.get("solder_mask_colour") and SOLDER_MASK_FIELD_CODE:
         color_id = dicts.get_solder_mask_color_id(pcb_data["solder_mask_colour"])
         if color_id:
-            # Нужно узнать точный код поля для цвета паяльной маски
-            # Пока пропускаем, так как нет точного кода поля в документации
-            pass
+            fields[SOLDER_MASK_FIELD_CODE] = color_id
+            logger.debug(f"Solder mask colour: '{pcb_data['solder_mask_colour']}' -> {color_id}")
+        else:
+            logger.warning(f"Не найден ID для цвета паяльной маски: '{pcb_data['solder_mask_colour']}'")
     
+    # Цвет маркировки / legend (solder_mark_colour). Задайте код поля из Битрикс24 при необходимости.
+    SILKSCREEN_FIELD_CODE: Optional[str] = None  # например "ufCrm24_1707839YYY"
+    if pcb_data.get("solder_mark_colour") and SILKSCREEN_FIELD_CODE:
+        silkscreen_id = dicts.get_silkscreen_color_id(pcb_data["solder_mark_colour"])
+        if silkscreen_id:
+            fields[SILKSCREEN_FIELD_CODE] = silkscreen_id
+            logger.debug(f"Silkscreen colour: '{pcb_data['solder_mark_colour']}' -> {silkscreen_id}")
+
     # UF_CRM_24_1707839110: Edge plating (справочник 72)
     if pcb_data.get("edge_plating"):
         plating_id = dicts.get_edge_plating_id(pcb_data["edge_plating"])

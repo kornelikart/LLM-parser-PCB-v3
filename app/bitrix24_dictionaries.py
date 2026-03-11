@@ -18,6 +18,7 @@
 """
 from typing import Dict, Optional
 import os
+import re
 
 def _try_get_db():
     """
@@ -41,93 +42,234 @@ def _try_get_db():
 
 # Справочник 56: Materials (Материал основания платы)
 # IBLOCK_ID = 56
+# Ключи — текст, который может вернуть LLM или встретиться в спецификации.
 MATERIALS_DICT: Dict[str, int] = {
-    "FR4": 6281,
-    "FR-4": 6281,  # альтернативное написание
-    # Добавьте другие материалы по мере необходимости
+    # Базовые FR‑4
+    "fr4": 5774,
+    "fr-4": 5774,
+    "fr4 tg-135": 5804,
+    "fr4 tg-150": 5806,
+    "fr4 tg-170": 5808,
+    "fr4 tg-180": 5774,
+    "High Tg FR-4": 5774,
+    "High Tg FR4": 5774,
+    "High Tg FR-4 TG-180": 5774,
+    "High Tg FR4 TG-180": 5774,
+    # Варианты для формулировок из спецификаций (при необходимости замените ID на ваш из Битрикс24)
+    "fr-4 (high tg reliability)": 5774,
+    "fr4 (high tg reliability)": 5774,
+    "FR-4 (high TG reliability)": 5774,
+    "FR4 (high TG reliability)": 5774,
+    # Часто встречающиеся материалы
+    "aluminum": 5642,
+    "mix/others": 5646,
+    "polyimide": 5652,
+    "rogers 4003": 5650,
+    "rogers 4350": 5658,
+    "rogers 3003": 5660,
+    "rogers 5880": 5690,
+    "rogers 6002": 5694,
+    "rogers 6010": 5692,
+    "megtron 4": 5716,
+    "megtron 6": 5792,
+    "isola fr408": 5664,
+    "isola fr408hr": 5680,
+    "isola itera mt40": 5688,
+    "isola 370hr": 5742,
 }
 
 # Справочник 74: Finish Type (Тип финишного покрытия)
+# IBLOCK_ID = 74
 FINISH_TYPE_DICT: Dict[str, int] = {
-    "HASL": 7010,
-    "HASL Lead-Free": 7010,
-    "ENIG": 5256,  # пример, нужно уточнить ID
-    "OSP": 6610,  # пример, нужно уточнить ID
-    # Добавьте другие типы покрытия
+    "none": 5926,
+    "hasl (pbsn)": 5928,
+    "hasl lf": 5946,
+    "hasl lead-free": 5946,
+    "hasl lead free": 5946,
+    "enepig": 5930,
+    "soft gold": 5932,
+    "imm. gold (chem.ni/au)": 5934,
+    "Хим. Н.5 Зл.0.1": 5934,
+    "Immersion gold (Ni5 Au0.1)": 5934,
+    "imm. silver (chem. ag)": 5950,
+    "imm. tin (chem. sn)": 5952,
+    "hard gold (galv. au)": 5954,
+    "flash gold": 5956,
+    "osp": 5958,
+    "mix": 5960,
+    "no coating": 5948,
 }
 
 # Справочник 54: No of Layers (Количество слоев)
+# IBLOCK_ID = 54
 LAYERS_DICT: Dict[str, int] = {
-    "1": 6014,  # пример ID для 1 слоя
-    "2": 6014,  # пример ID для 2 слоев
-    "4": 6014,  # пример ID для 4 слоев
-    "6": 6014,  # пример ID для 6 слоев
-    "8": 6014,  # пример ID для 8 слоев
-    # Нужно уточнить реальные ID для каждого количества слоев
+    # Основной диапазон слоев (дублируем представление без ведущих нулей)
+    "1": 6784,
+    "01": 6784,
+    "2": 6786,
+    "02": 6786,
+    "4": 6788,
+    "04": 6788,
+    "6": 6790,
+    "06": 6790,
+    "8": 6792,
+    "08": 6792,
+    "10": 6794,
+    "12": 6796,
+    "14": 6798,
+    "16": 6800,
+    "18": 6802,
+    "20": 6804,
+    "22": 6806,
+    "24": 6808,
+    "26": 6810,
+    "28": 6812,
+    "30": 6814,
+    "32": 6816,
+    "34": 6818,
+    "36": 6820,
+    "38": 6822,
+    "40": 6824,
+    "42": 6826,
+    "44": 6828,
+    "46": 6830,
+    "48": 6832,
+    "50": 6834,
+    "52": 6836,
+    "54": 6838,
+    "56": 6840,
+    "58": 6842,
+    "60": 6844,
+    "62": 6846,
+    "64": 6848,
 }
 
 # Справочник 62: Max Copper (base OZ) - Толщина меди
+# IBLOCK_ID = 62
 COPPER_THICKNESS_DICT: Dict[str, int] = {
-    "0.5 OZ": 6002,
-    "0.5": 6002,
-    "1 OZ": 6002,
-    "1": 6002,
-    "1.5 OZ": 6002,
-    "1.5": 6002,
-    "2 OZ": 6002,
-    "2": 6002,
-    # Нужно уточнить реальные ID для каждой толщины
+    "0": 5814,
+    "0 oz": 5814,
+    "1/8 oz (4.375 um)": 5816,
+    "0.125": 5816,
+    "1/4 oz (8.75 um)": 5818,
+    "0.25": 5818,
+    "0.33 oz (12 um)": 5820,
+    "0.33": 5820,
+    "0.5 oz (17 um)": 5822,
+    "0.5": 5822,
+    "0,018": 5822,
+    "1 oz (35 um)": 5824,
+    "1": 5824,
+    "0,035": 5824,
+    "1.5 oz (52um)": 5826,
+    "1.5": 5826,
+    "0,052": 5826,
+    "2 oz (70 um)": 5832,
+    "2": 5832,
+    "0,070": 5832,
+    "3 oz (105 um)": 5834,
+    "3": 5834,
+    "0,105": 5834,
+    "4 oz (140 um)": 5836,
+    "4": 5836,
+    "0,140": 5836,
+    "5 oz (175 um)": 5838,
+    "5": 5838,
+    "6 oz (210 um)": 5840,
+    "6": 5840,
+    "7 oz (245 um)": 5842,
+    "7": 5842,
+    "8 oz (280 um)": 5844,
+    "8": 5844,
+    "9 oz (315 um)": 5846,
+    "9": 5846,
+    "12 oz (400um)": 5828,
+    "12": 5828,
+    "via migration": 5848,
 }
 
 # Справочник 50: Order unit (Единица заказа)
+# IBLOCK_ID = 50
 ORDER_UNIT_DICT: Dict[str, int] = {
-    "шт": 5256,  # пример
+    "ea": 5256,
+    "шт": 5256,
     "piece": 5256,
     "pcs": 5256,
-    # Нужно уточнить реальные ID
+    "pnl": 5258,
+    "panel": 5258,
+    "панель": 5258,
 }
 
 # Справочник 52: PCB type (Тип платы)
+# IBLOCK_ID = 52
 PCB_TYPE_DICT: Dict[str, int] = {
-    "Rigid": 5804,  # пример
-    "Flex": 5804,
-    "Rigid-Flex": 5804,
-    # Нужно уточнить реальные ID
+    "rigid": 6610,
+    "rigid pcb": 6610,
+    "flex": 6612,
+    "flex pcb": 6612,
+    "stiffener+flex": 6614,
+    "stiffener+rigid+flex": 6616,
+    "flex+rigid": 6618,
+    "exotic": 6620,
+    "semi-flex": 6622,
+    "semiflex": 6622,
 }
 
 # Справочник 86: Peelable SM (Пилинг-маска)
+# IBLOCK_ID = 86
 PEELABLE_SM_DICT: Dict[str, int] = {
-    "Yes": 6270,  # пример
-    "No": 6270,
-    # Нужно уточнить реальные ID
+    "no": 6014,
+    "нет": 6014,
+    "none": 6014,
+    "yes": 7174,
+    "да": 7174,
 }
 
 # Справочник 160: Production Unit (Производственный участок)
+# IBLOCK_ID = 160
 PRODUCTION_UNIT_DICT: Dict[str, int] = {
-    # Нужно заполнить значениями из вашего справочника
+    "ea": 6270,
+    "шт": 6270,
+    "pnl": 6272,
+    "panel": 6272,
+    "панель": 6272,
 }
 
-# Справочник 64: Solder Mask Color (Цвет паяльной маски)
+# Справочник 64: Solder Mask Color (Цвет паяльной маски). ID уточните в Битрикс24.
 SOLDER_MASK_COLOR_DICT: Dict[str, int] = {
+    "green": 8002,
     "Green": 8002,
-    "Red": 8002,  # пример, нужно уточнить ID
+    "red": 8002,
+    "Red": 8002,
+    "blue": 8002,
     "Blue": 8002,
+    "black": 8002,
     "Black": 8002,
+    "white": 8002,
     "White": 8002,
+    "yellow": 8002,
+    "Yellow": 8002,
 }
 
-# Справочник 66: SilkScreen Color (Цвет маркировки)
+# Справочник 66: SilkScreen Color (Цвет маркировки). ID уточните в Битрикс24.
 SILKSCREEN_COLOR_DICT: Dict[str, int] = {
-    "Green": 7002,
-    "White": 7002,  # пример, нужно уточнить ID
+    "white": 7002,
+    "White": 7002,
+    "black": 7002,
     "Black": 7002,
+    "green": 7002,
+    "Green": 7002,
 }
 
 # Справочник 72: Edge plating (Металлизация края)
 EDGE_PLATING_DICT: Dict[str, int] = {
-    "Yes": 5860,  # пример
-    "No": 5860,
-    # Нужно уточнить реальные ID
+    "yes": 5864,
+    "да": 5864,
+    "no": 5862,
+    "нет": 5862,
+    "none": 5862,
+    "n/a": 5862,
+    "—": 5862,
 }
 
 def normalize_text(text: str) -> str:
@@ -147,6 +289,8 @@ def find_item_id(
 ) -> Optional[int]:
     """
     Находит ID элемента в справочнике по текстовому значению.
+    При нечётком совпадении приоритет у самого длинного (наиболее специфичного) ключа,
+    чтобы, например, "Immersion gold (Ni5 Au0.1)" не матчился как "soft gold".
     
     Args:
         text_value: Текстовое значение для поиска
@@ -158,27 +302,33 @@ def find_item_id(
     """
     if not text_value:
         return None
-    
-    # Точное совпадение (регистронезависимое)
+
     normalized_input = normalize_text(text_value)
+    input_lower = text_value.lower().strip()
+
+    # 1) Точное совпадение (нормализованное)
     for key, item_id in dictionary.items():
         if normalize_text(key) == normalized_input:
             return item_id
-    
-    # Нечеткое совпадение (если включено)
+
+    # 2) Нечёткое совпадение: перебираем ключи от длинных к коротким,
+    #    чтобы "Immersion gold (Ni5 Au0.1)" сработал раньше, чем "soft gold"
     if fuzzy_match:
-        normalized_input = text_value.lower().strip()
-        for key, item_id in dictionary.items():
+        for key, item_id in sorted(dictionary.items(), key=lambda x: -len(x[0])):
             key_lower = key.lower().strip()
-            # Проверка на вхождение подстроки
-            if key_lower in normalized_input or normalized_input in key_lower:
+            key_norm = normalize_text(key)
+            # Точное вхождение ключа в текст (или наоборот)
+            if key_lower in input_lower or input_lower in key_lower:
                 return item_id
-            # Проверка на частичное совпадение слов
-            input_words = set(normalized_input.split())
-            key_words = set(key_lower.split())
-            if input_words & key_words:  # пересечение множеств
+            if key_norm and key_norm in normalized_input:
                 return item_id
-    
+            # Совпадение по словам — только если ключ целиком "покрыт" входом
+            # (вход содержит все значимые слова ключа), иначе пропускаем
+            key_words = set(w for w in key_lower.split() if len(w) > 1)
+            input_words = set(w for w in input_lower.split() if len(w) > 1)
+            if key_words and key_words <= input_words:
+                return item_id
+
     return None
 
 
@@ -199,12 +349,10 @@ def get_finish_type_id(finish_text: str) -> Optional[int]:
 
 
 def get_layers_id(layers_text: str) -> Optional[int]:
-    """Получить ID количества слоев из справочника 54"""
+    """Получить ID количества слоев из справочника 54. Из строк вроде '8' или '8 layers' берётся число."""
     db = _try_get_db()
     if db:
         return db.find_item_id(54, str(layers_text))
-    # Пытаемся извлечь число из текста
-    import re
     numbers = re.findall(r'\d+', str(layers_text))
     if numbers:
         layers_count = numbers[0]
@@ -212,12 +360,42 @@ def get_layers_id(layers_text: str) -> Optional[int]:
     return find_item_id(layers_text, LAYERS_DICT)
 
 
+def _extract_primary_copper_thickness(thickness_text: str) -> str:
+    """
+    Из строк вроде "Top/Bot: 35 µm (1 oz), Inner: 18 µm (0.5 oz)" извлекает
+    основную толщину (обычно внешние слои), чтобы не матчить "0" из "0.5 oz".
+    """
+    if not thickness_text or not thickness_text.strip():
+        return thickness_text
+    text = thickness_text.strip()
+    # Берём первый сегмент до запятой (часто Top/Bot / внешние слои)
+    first_part = text.split(",")[0].strip()
+    # Ищем "X oz" или "X oz" — X может быть 0.125, 0.25, 0.5, 1, 1.5, 2 и т.д.
+    oz_match = re.search(r"(\d+(?:\.\d+)?)\s*oz", first_part, re.IGNORECASE)
+    if oz_match:
+        val = oz_match.group(1)
+        # Не используем "0" как основную толщину, если есть что-то вроде "0.5 oz"
+        if val == "0":
+            # В первом сегменте только 0 oz — попробуем весь текст
+            oz_all = re.search(r"(\d+(?:\.\d+)?)\s*oz", text, re.IGNORECASE)
+            if oz_all and oz_all.group(1) != "0":
+                return oz_all.group(0).strip()  # e.g. "1 oz"
+            return "0 oz"
+        return oz_match.group(0).strip()
+    # Альтернатива: "35 µm" / "35um" -> считаем 1 oz
+    um_match = re.search(r"(\d+)\s*µm", first_part, re.IGNORECASE)
+    if um_match:
+        return first_part
+    return thickness_text
+
+
 def get_copper_thickness_id(thickness_text: str) -> Optional[int]:
-    """Получить ID толщины меди из справочника 62"""
+    """Получить ID толщины меди из справочника 62. Для составных строк (Top/Bot: 1 oz, Inner: 0.5 oz) учитывается первая толщина."""
     db = _try_get_db()
     if db:
         return db.find_item_id(62, thickness_text)
-    return find_item_id(thickness_text, COPPER_THICKNESS_DICT)
+    primary = _extract_primary_copper_thickness(thickness_text)
+    return find_item_id(primary, COPPER_THICKNESS_DICT)
 
 
 def get_order_unit_id(unit_text: str) -> Optional[int]:

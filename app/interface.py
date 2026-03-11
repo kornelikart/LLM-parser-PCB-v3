@@ -23,14 +23,30 @@ def _file_basename(file):
 
 def show_outputs():
     logger.info("Processing done")
-    return gr.update(visible=True), gr.update(visible=True), \
-        gr.update(visible=True), gr.update(visible=True), gr.update(visible=True)
+    # Показать таблицу распознанных характеристик, таблицу маппинга в поля Битрикс24
+    # и все файлы для скачивания.
+    return (
+        gr.update(visible=True),  # excel_parsed_reports
+        gr.update(visible=True),  # bitrix24_mapped_fields
+        gr.update(visible=True),  # excel_download_csv
+        gr.update(visible=True),  # excel_download_xlsx
+        gr.update(visible=True),  # excel_download_json
+        gr.update(visible=True),  # excel_download_bitrix24_json
+    )
+
 
 def hide_outputs():
     logger.debug("File was closed")
-    return gr.update(value=pd.DataFrame(), visible=False), gr.update(visible=False), \
-        gr.update(visible=False), gr.update(visible=False), gr.update(visible=False), \
-        gr.update(visible=False)
+    # Скрыть все таблицы и файлы, кнопку распознавания тоже спрятать.
+    return (
+        gr.update(value=pd.DataFrame(), visible=False),  # excel_parsed_reports
+        gr.update(value=pd.DataFrame(), visible=False),  # bitrix24_mapped_fields
+        gr.update(visible=False),  # excel_download_csv
+        gr.update(visible=False),  # excel_download_xlsx
+        gr.update(visible=False),  # excel_download_json
+        gr.update(visible=False),  # excel_download_bitrix24_json
+        gr.update(visible=False),  # excel_process_btn
+    )
 
 # Глобальная переменная для хранения распарсенных данных
 _parsed_pcb_data = None
@@ -67,10 +83,15 @@ def parse_excel_pcb(file):
         df = pd.DataFrame(list(parsed_dict.items()), columns=['Characteristic', 'Value'])
         df.to_csv(csv_path, index=False)
         df.to_excel(xlsx_path, index=False)
-        df.to_json(json_path, index=False)
+        # JSON сохраняем в виде списка записей, без индекса
+        df.to_json(json_path, orient="records", force_ascii=False)
         
         # Создаем JSON файл в формате Битрикс24
         bitrix24_fields = bitrix24.map_pcb_to_bitrix24_fields(parsed_dict)
+        # Таблица с полями UF_CRM_24_* и их значениями/ID, которые уйдут в Битрикс24
+        bitrix24_df = pd.DataFrame(
+            [{"Field": k, "Value": v} for k, v in bitrix24_fields.items()]
+        )
         bitrix24_payload = {
             "entityTypeId": 182,
             "fields": bitrix24_fields
@@ -91,7 +112,11 @@ def parse_excel_pcb(file):
             raise Exception("Сервис временно недоступен из-за высокого спроса. Пожалуйста, попробуйте позже или обновите API ключ.")
         else:
             raise e
-    return df, csv_path, xlsx_path, json_path, bitrix24_json_path
+    # Возвращаем:
+    # - таблицу распознанных характеристик
+    # - таблицу маппинга полей Битрикс24 (UF + ID/значения)
+    # - пути к файлам для скачивания
+    return df, bitrix24_df, csv_path, xlsx_path, json_path, bitrix24_json_path
 
 
 def send_to_bitrix24():
@@ -193,6 +218,12 @@ def create_interface(title: str = "gradio app"):
                     visible=False,
                     min_width=10
                 )
+                bitrix24_mapped_fields = gr.DataFrame(
+                    label="Поля для Битрикс24 (UF_CRM_24_* и значения/ID)",
+                    show_copy_button=True,
+                    visible=False,
+                    min_width=10
+                )
                 with gr.Row():
                     excel_download_csv = gr.File(label="Скачать как CSV", visible=False)
                     excel_download_xlsx = gr.File(label="Скачать как XLSX", visible=False)
@@ -205,16 +236,51 @@ def create_interface(title: str = "gradio app"):
 
         # Excel processing events
         excel_input.upload(lambda: gr.update(visible=True), None, excel_process_btn)
-        excel_process_btn.click(parse_excel_pcb, [excel_input], 
-                               [excel_parsed_reports, excel_download_csv, excel_download_xlsx, excel_download_json, excel_download_bitrix24_json], queue=True)
-        excel_process_btn.click(show_outputs, None, [excel_parsed_reports, excel_download_csv, excel_download_xlsx, excel_download_json, excel_download_bitrix24_json], queue=True)
+        excel_process_btn.click(
+            parse_excel_pcb,
+            [excel_input],
+            [
+                excel_parsed_reports,
+                bitrix24_mapped_fields,
+                excel_download_csv,
+                excel_download_xlsx,
+                excel_download_json,
+                excel_download_bitrix24_json,
+            ],
+            queue=True,
+        )
+        excel_process_btn.click(
+            show_outputs,
+            None,
+            [
+                excel_parsed_reports,
+                bitrix24_mapped_fields,
+                excel_download_csv,
+                excel_download_xlsx,
+                excel_download_json,
+                excel_download_bitrix24_json,
+            ],
+            queue=True,
+        )
         excel_process_btn.click(
             lambda: (gr.update(visible=True), gr.update(visible=True)),
             None,
             [bitrix24_status, bitrix24_send_btn],
             queue=True
         )
-        excel_input.clear(hide_outputs, None, [excel_parsed_reports, excel_download_csv, excel_download_xlsx, excel_download_json, excel_download_bitrix24_json, excel_process_btn])
+        excel_input.clear(
+            hide_outputs,
+            None,
+            [
+                excel_parsed_reports,
+                bitrix24_mapped_fields,
+                excel_download_csv,
+                excel_download_xlsx,
+                excel_download_json,
+                excel_download_bitrix24_json,
+                excel_process_btn,
+            ],
+        )
         excel_input.clear(
             lambda: (gr.update(visible=False), gr.update(visible=False)),
             None,
