@@ -147,8 +147,8 @@ LAYERS_DICT: Dict[str, int] = {
 # Справочник 62: Max Copper (base OZ) - Толщина меди
 # IBLOCK_ID = 62
 COPPER_THICKNESS_DICT: Dict[str, int] = {
-    "0": 5814,
-    "0 oz": 5814,
+    #"0": 5814,
+    #"0 oz": 5814,
     "1/8 oz (4.375 um)": 5816,
     "0.125": 5816,
     "1/4 oz (8.75 um)": 5818,
@@ -386,16 +386,79 @@ def _extract_primary_copper_thickness(thickness_text: str) -> str:
     um_match = re.search(r"(\d+)\s*µm", first_part, re.IGNORECASE)
     if um_match:
         return first_part
+    # Частый формат из LLM: перечисление толщин в мм, например:
+    # "L1: 0.018+0.025 mm, L2-L3: 0.035 mm, L4: 0.018+0.025 mm"
+    # Для поля Bitrix24 "Max Copper (base OZ)" нас интересует базовая фольга (первое число)
+    # и/или максимальная базовая толщина среди слоёв.
+    if "mm" in first_part.lower() or "мм" in first_part.lower() or "mm" in text.lower() or "мм" in text.lower():
+        return text
     return thickness_text
 
 
 def get_copper_thickness_id(thickness_text: str) -> Optional[int]:
-    """Получить ID толщины меди из справочника 62. Для составных строк (Top/Bot: 1 oz, Inner: 0.5 oz) учитывается первая толщина."""
+    """
+    Получить ID толщины меди из справочника 62 (Max Copper / base OZ).
+    
+    Поддерживаемые форматы входа:
+    - "Top/Bot: 35 µm (1 oz), Inner: 18 µm (0.5 oz)" → берём 1 oz (Top/Bot)
+    - "L1: 0.018+0.025 mm, L2-L3: 0.035 mm, ..." → берём максимальную базовую фольгу (0.035 mm → 1 oz)
+    
+    Важно: избегаем ошибочного матчинга ключа "0" (0 oz) по подстроке из "0.018"/"0.035".
+    """
     db = _try_get_db()
     if db:
         return db.find_item_id(62, thickness_text)
     primary = _extract_primary_copper_thickness(thickness_text)
-    return find_item_id(primary, COPPER_THICKNESS_DICT)
+
+    # 1) Сначала пробуем распознать oz/µm форматы как есть
+    if primary:
+        oz_id = find_item_id(primary, COPPER_THICKNESS_DICT)
+        if oz_id:
+            return oz_id
+
+    # 2) Если пришёл формат в мм: извлекаем базовую толщину фольги
+    # Считаем, что "base foil" — это первое число в сегменте (до "+"), а "max" — максимум по всем сегментам.
+    text = (thickness_text or "").replace(",", ".")
+    if not text.strip():
+        return None
+
+    # Вытащим все десятичные числа вида 0.018 / 0.035 и т.п.
+    mm_numbers = [float(x) for x in re.findall(r"\d+(?:\.\d+)?", text)]
+    # Фильтруем на реалистичные значения в мм для фольги (0.001–0.5)
+    mm_numbers = [x for x in mm_numbers if 0.001 <= x <= 0.5]
+    if not mm_numbers:
+        return None
+
+    max_mm = max(mm_numbers)
+
+    # Приводим к каноническим ключам словаря (часть словаря использует запятую)
+    # Пороговые интервалы подобраны под типовые: 18µm=0.018mm=0.5oz, 35µm=0.035mm=1oz, 52µm=0.052mm=1.5oz, 70µm=0.070mm=2oz
+    def mm_to_key(mm: float) -> Optional[str]:
+        if 0.015 <= mm <= 0.022:
+            return "0.5"
+        if 0.030 <= mm <= 0.040:
+            return "1"
+        if 0.047 <= mm <= 0.057:
+            return "1.5"
+        if 0.065 <= mm <= 0.075:
+            return "2"
+        if 0.095 <= mm <= 0.115:
+            return "3"
+        if 0.130 <= mm <= 0.150:
+            return "4"
+        return None
+
+    key = mm_to_key(max_mm)
+    if key:
+        # Это важный момент: ищем по точному числу ("1", "0.5"), а не по всей строке,
+        # чтобы никогда не совпасть с ключом "0" по подстроке.
+        return find_item_id(key, COPPER_THICKNESS_DICT, fuzzy_match=False) or find_item_id(key, COPPER_THICKNESS_DICT)
+
+    # Если интервалы не подошли — пробуем поиск по наиболее похожему значению в мм, которое уже есть в словаре
+    # (например, "0,035", "0,052", ...)
+    rounded = round(max_mm, 3)
+    key_mm_comma = f"{rounded:.3f}".replace(".", ",")
+    return find_item_id(key_mm_comma, COPPER_THICKNESS_DICT, fuzzy_match=False) or find_item_id(primary, COPPER_THICKNESS_DICT)
 
 
 def get_order_unit_id(unit_text: str) -> Optional[int]:
