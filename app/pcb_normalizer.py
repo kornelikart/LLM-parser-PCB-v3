@@ -277,15 +277,21 @@ base_material (field: base_material):
 {json.dumps(material_keys, ensure_ascii=False)}
 
 Mapping hints for base_material:
-- "FR4", "FR-4" (generic, no TG specified)               → "FR4 TG-180"
-- "FR4 TG135", "FR-4 TG-135"                            → "FR4 TG-135"
-- "FR4 TG150", "FR-4 TG-150"                            → "FR4 TG-150"
-- "FR4 TG170", "FR-4 TG-170"                            → "FR4 TG-170"
-- "FR4 TG180", "High Tg FR4", "FR-4 (High TG)"         → "FR4 TG-180"
-- "Polyimide", "PI", "Kapton"                            → "Polyimide"
-- "Rogers 4003C", "RO4003", "RO4003C"                   → "Rogers 4003"
-- "Rogers 4350B", "RO4350", "RO4350B"                   → "Rogers 4350"
-- "Aluminum", "Aluminium", "Al substrate"                → "Aluminum"
+IMPORTANT: Only map to FR4 variants if the text clearly says "FR4" or "FR-4".
+Do NOT map other materials (F4BM, PTFE, ceramic-filled, etc.) to FR4.
+If the material name does not clearly match any entry in the list → use "MIX/Others".
+
+- "FR4", "FR-4" (must explicitly say FR4/FR-4, no TG specified)  → "FR4 TG-180"
+- "FR4 TG135", "FR-4 TG-135"                                     → "FR4 TG-135"
+- "FR4 TG150", "FR-4 TG-150"                                     → "FR4 TG-150"
+- "FR4 TG170", "FR-4 TG-170"                                     → "FR4 TG-170"
+- "FR4 TG180", "High Tg FR4", "FR-4 (High TG)"                  → "FR4 TG-180"
+- "Polyimide", "PI", "Kapton"                                     → "Polyimide"
+- "Rogers 4003C", "RO4003", "RO4003C"                            → "Rogers 4003"
+- "Rogers 4350B", "RO4350", "RO4350B"                            → "Rogers 4350"
+- "Aluminum", "Aluminium", "Al substrate", "IMS"                 → "Aluminum"
+- Any exotic, unknown, or composite material (F4BM, PTFE,
+  Teflon, ceramic-filled, ND-PTFE, etc.)                         → "MIX/Others"
 
 pcb_type (field: pcb_type):
 {json.dumps(pcb_type_keys, ensure_ascii=False)}
@@ -307,7 +313,7 @@ OUTPUT FORMAT (return exactly this JSON, no extra keys):
 {{
   "finish_type":      "<canonical value or null>",
   "copper_thickness": "<canonical value or null>",
-  "base_material":    "<canonical value or null>",
+  "base_material":    "<canonical value or 'MIX/Others' if unrecognized>",
   "pcb_type":         "<canonical value or null>",
   "ipc_class":        "<canonical value or null>"
 }}"""
