@@ -423,9 +423,16 @@ def map_to_bitrix24_ids(enriched: dict[str, Any]) -> dict[str, int]:
         if (v := OUTER_COPPER_FROM_COPPER.get(copper)) is not None:
             ids["ufCrm24_1707849930"] = v                    # Outer layers (Copper)
 
-    if material := normalized.get("base_material"):
-        if (v := MATERIALS.get(material)) is not None:
-            ids["ufCrm24_1707838248"] = v
+    # Если материал был распознан (поле не пустое), но LLM не смог нормализовать
+    # его к каноническому значению — ставим MIX/Others (ID 5646).
+    if enriched.get("base_material"):
+        material = normalized.get("base_material")
+        ids["ufCrm24_1707838248"] = MATERIALS.get(material) if material else MATERIALS["MIX/Others"]
+        if not material:
+            logger.warning(
+                "Материал '%s' не найден в справочнике — назначен MIX/Others (5646)",
+                enriched.get("base_material"),
+            )
 
     if pcb_type := normalized.get("pcb_type"):
         if (v := PCB_TYPE.get(pcb_type)) is not None:

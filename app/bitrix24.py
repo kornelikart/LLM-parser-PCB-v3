@@ -278,13 +278,17 @@ def map_pcb_to_bitrix24_fields(pcb_data: Dict[str, Any], mistral_client: Any = N
     # ── Старый вариант: dicts.* (fallback) ────────────────────────────────
     if not normalization_used:
         # UF_CRM_24_1707838248: Materials (справочник 56)
+        # Если материал не найден в справочнике — назначаем MIX/Others (ID 5646).
         if pcb_data.get("base_material"):
-            material_id = dicts.get_material_id(pcb_data["base_material"])
-            if material_id:
-                fields["ufCrm24_1707838248"] = material_id
-                logger.debug("Materials: '%s' -> %s", pcb_data["base_material"], material_id)
+            material_id = dicts.get_material_id(pcb_data["base_material"]) or 5646
+            fields["ufCrm24_1707838248"] = material_id
+            if material_id == 5646:
+                logger.warning(
+                    "Материал '%s' не найден в справочнике — назначен MIX/Others (5646)",
+                    pcb_data["base_material"],
+                )
             else:
-                logger.warning("Не найден ID для материала: '%s'", pcb_data["base_material"])
+                logger.debug("Materials: '%s' -> %s", pcb_data["base_material"], material_id)
 
         # UF_CRM_24_1707768819: Finish Type (справочник 74)
         if pcb_data.get("coverage_type"):
