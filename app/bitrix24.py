@@ -12,7 +12,7 @@ try:
     from logger import setup_logger
     import bitrix24_dictionaries as dicts
     from pcb_normalizer import normalize_and_get_ids
-except:
+except ImportError:
     from .logger import setup_logger
     from . import bitrix24_dictionaries as dicts
     from .pcb_normalizer import normalize_and_get_ids
@@ -147,9 +147,9 @@ def create_bitrix24_item(
         "fields": fields
     }
     
-    logger.info(f"Отправка данных в Битрикс24: {len(fields)} полей")
-    logger.debug(f"URL: {url}")
-    logger.debug(f"Payload: {payload}")
+    logger.info("Отправка данных в Битрикс24: %d полей", len(fields))
+    logger.debug("URL: %s", url)
+    logger.debug("Payload: %s", payload)
     
     try:
         with httpx.Client(timeout=30.0) as client:
@@ -163,24 +163,24 @@ def create_bitrix24_item(
             
             if "error" in result:
                 error_msg = result.get("error_description", result.get("error", "Unknown error"))
-                logger.error(f"Ошибка Битрикс24 API: {error_msg}")
+                logger.error("Ошибка Битрикс24 API: %s", error_msg)
                 raise Exception(f"Ошибка Битрикс24: {error_msg}")
             
             item_id = result.get("result", {}).get("item", {}).get("id")
-            logger.info(f"Успешно создан элемент в Битрикс24 с ID: {item_id}")
+            logger.info("Успешно создан элемент в Битрикс24 с ID: %s", item_id)
             return result
             
     except httpx.HTTPStatusError as e:
-        logger.error(f"HTTP ошибка при отправке в Битрикс24: {e}")
+        logger.error("HTTP ошибка при отправке в Битрикс24: %s", e)
         error_detail = ""
         try:
             error_response = e.response.json()
             error_detail = error_response.get("error_description", error_response.get("error", ""))
-        except:
+        except Exception:
             error_detail = str(e)
         raise Exception(f"Ошибка подключения к Битрикс24: {error_detail}")
     except httpx.RequestError as e:
-        logger.error(f"Ошибка запроса к Битрикс24: {e}")
+        logger.error("Ошибка запроса к Битрикс24: %s", e)
         raise Exception(f"Не удалось подключиться к Битрикс24: {str(e)}")
 
 
@@ -282,27 +282,27 @@ def map_pcb_to_bitrix24_fields(pcb_data: Dict[str, Any], mistral_client: Any = N
             material_id = dicts.get_material_id(pcb_data["base_material"])
             if material_id:
                 fields["ufCrm24_1707838248"] = material_id
-                logger.debug(f"Materials: '{pcb_data['base_material']}' -> {material_id}")
+                logger.debug("Materials: '%s' -> %s", pcb_data["base_material"], material_id)
             else:
-                logger.warning(f"Не найден ID для материала: '{pcb_data['base_material']}'")
+                logger.warning("Не найден ID для материала: '%s'", pcb_data["base_material"])
 
         # UF_CRM_24_1707768819: Finish Type (справочник 74)
         if pcb_data.get("coverage_type"):
             finish_id = dicts.get_finish_type_id(pcb_data["coverage_type"])
             if finish_id:
                 fields["ufCrm24_1707768819"] = finish_id
-                logger.debug(f"Finish Type: '{pcb_data['coverage_type']}' -> {finish_id}")
+                logger.debug("Finish Type: '%s' -> %s", pcb_data["coverage_type"], finish_id)
             else:
-                logger.warning(f"Не найден ID для типа покрытия: '{pcb_data['coverage_type']}'")
+                logger.warning("Не найден ID для типа покрытия: '%s'", pcb_data["coverage_type"])
 
         # UF_CRM_24_1707838441: Max Copper (base OZ) (справочник 62)
         if pcb_data.get("foil_thickness"):
             copper_id = dicts.get_copper_thickness_id(pcb_data["foil_thickness"])
             if copper_id:
                 fields["ufCrm24_1707838441"] = copper_id
-                logger.debug(f"Copper thickness: '{pcb_data['foil_thickness']}' -> {copper_id}")
+                logger.debug("Copper thickness: '%s' -> %s", pcb_data["foil_thickness"], copper_id)
             else:
-                logger.warning(f"Не найден ID для толщины меди: '{pcb_data['foil_thickness']}'")
+                logger.warning("Не найден ID для толщины меди: '%s'", pcb_data["foil_thickness"])
 
     # UF_CRM_24_1709815185: No of Layers — маппим только если pcb_normalizer не справился
     # (при normalization_used=True это поле уже есть в b24_ids → fields).
@@ -310,9 +310,9 @@ def map_pcb_to_bitrix24_fields(pcb_data: Dict[str, Any], mistral_client: Any = N
         layers_id = dicts.get_layers_id(str(pcb_data["layer_count"]))
         if layers_id:
             fields["ufCrm24_1709815185"] = layers_id
-            logger.debug(f"Layers (fallback): '{pcb_data['layer_count']}' -> {layers_id}")
+            logger.debug("Layers (fallback): '%s' -> %s", pcb_data["layer_count"], layers_id)
         else:
-            logger.warning(f"Не найден ID для количества слоев: '{pcb_data['layer_count']}'")
+            logger.warning("Не найден ID для количества слоев: '%s'", pcb_data["layer_count"])
 
     # ========== ГЕОМЕТРИЧЕСКИЕ ПАРАМЕТРЫ (double) ==========
     
@@ -330,7 +330,7 @@ def map_pcb_to_bitrix24_fields(pcb_data: Dict[str, Any], mistral_client: Any = N
                 fields["ufCrm24_1708353402068"] = bw                          # Board Width (mm)
                 fields["ufCrm24_1708374692747"] = round(bl * bw / 100, 4)    # Board Size (sqr dec)
         except Exception as e:
-            logger.debug(f"Не удалось распарсить размер платы: {e}")
+            logger.debug("Не удалось распарсить размер платы: %s", e)
 
     # Парсинг панелизации — так же по числам
     if pcb_data.get("panelization"):
@@ -345,7 +345,7 @@ def map_pcb_to_bitrix24_fields(pcb_data: Dict[str, Any], mistral_client: Any = N
                 fields["ufCrm24_1708375871512"] = pw                          # Panel Width (mm)
                 fields["ufCrm24_1708375895460"] = round(pl * pw / 100, 4)    # Panel Size (sqr dec)
         except Exception as e:
-            logger.debug(f"Не удалось распарсить панелизацию: {e}")
+            logger.debug("Не удалось распарсить панелизацию: %s", e)
     
     # ========== ДОПОЛНИТЕЛЬНЫЕ ПОЛЯ ==========
 
@@ -357,10 +357,10 @@ def map_pcb_to_bitrix24_fields(pcb_data: Dict[str, Any], mistral_client: Any = N
         plating_id = dicts.get_edge_plating_id(pcb_data["edge_plating"])
         if plating_id:
             fields["ufCrm24_1707839110"] = plating_id
-            logger.debug(f"Edge plating (fallback): '{pcb_data['edge_plating']}' -> {plating_id}")
+            logger.debug("Edge plating (fallback): '%s' -> %s", pcb_data["edge_plating"], plating_id)
     
-    logger.info(f"Создано {len(fields)} полей для Битрикс24")
-    logger.debug(f"Поля: {list(fields.keys())}")
+    logger.info("Создано %d полей для Битрикс24", len(fields))
+    logger.debug("Поля: %s", list(fields.keys()))
     return fields
 
 

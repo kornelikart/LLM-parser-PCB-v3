@@ -6,7 +6,7 @@ try:    # for running interface.py
     from config import mistral_params, bitrix24_config
     from logger import setup_logger
     import bitrix24
-except: # for running main.py
+except ImportError:  # for running main.py
     from . import utils
     from .config import mistral_params, bitrix24_config
     from .logger import setup_logger
@@ -19,20 +19,6 @@ def _file_basename(file):
     """Имя файла без расширения для сохранения результатов."""
     path = getattr(file, "name", None) or str(file)
     return path.rsplit(".", 1)[0] if "." in path else path
-
-
-def show_outputs():
-    logger.info("Processing done")
-    # Показать таблицу распознанных характеристик, таблицу маппинга в поля Битрикс24
-    # и все файлы для скачивания.
-    return (
-        gr.update(visible=True),  # excel_parsed_reports
-        gr.update(visible=True),  # bitrix24_mapped_fields
-        gr.update(visible=True),  # excel_download_csv
-        gr.update(visible=True),  # excel_download_xlsx
-        gr.update(visible=True),  # excel_download_json
-        gr.update(visible=True),  # excel_download_bitrix24_json
-    )
 
 
 def hide_outputs():
@@ -48,20 +34,21 @@ def hide_outputs():
         gr.update(visible=False),  # excel_process_btn
     )
 
-# Глобальная переменная для хранения распарсенных данных
+# Глобальные переменные для хранения состояния сессии
 _parsed_pcb_data = None
 _mistral_client = None
+_bitrix24_fields = None  # кэш нормализованных полей, чтобы не запускать LLM дважды
 
 def parse_excel_pcb(file):
     """
     Извлекает данные из загруженного файла (Excel или Word), обрабатывает через LLM
     для извлечения характеристик ПП и сохраняет результаты в CSV, Excel и JSON.
     """
-    global _parsed_pcb_data
+    global _parsed_pcb_data, _mistral_client, _bitrix24_fields
     if isinstance(file, list) and file:
         file = file[0]
     logger.info("Starting to parse file for PCB characteristics: %s", getattr(file, "name", file))
-    
+
     try:
         doc_txt = utils.extract_document_data(file)
         logger.debug("Extracted document data")
@@ -69,44 +56,38 @@ def parse_excel_pcb(file):
         llm = utils.create_pcb_model(mistral_params)
         logger.debug("PCB model created successfully.")
 
-        parsed_dict = utils.process_excel_pcb(doc_txt, llm)
+        parsed_dict = utils.process_excel_pcb_with_retry(doc_txt, llm)
         logger.debug("Parsed PCB dictionary: %s", parsed_dict)
 
-        # Сохраняем Mistral-клиент для последующей нормализации (LLM prompt 2).
-        global _mistral_client
         _mistral_client = llm
-        
         _parsed_pcb_data = parsed_dict
 
         fn = _file_basename(file)
-        path_ext = lambda ext: f"{fn}_pcb_parsed.{ext}"
-        csv_path = path_ext("csv")
-        xlsx_path = path_ext("xlsx")
-        json_path = path_ext("json")
+        csv_path  = f"{fn}_pcb_parsed.csv"
+        xlsx_path = f"{fn}_pcb_parsed.xlsx"
+        json_path = f"{fn}_pcb_parsed.json"
         bitrix24_json_path = f"{fn}_bitrix24.json"
 
         df = pd.DataFrame(list(parsed_dict.items()), columns=['Characteristic', 'Value'])
         df.to_csv(csv_path, index=False)
         df.to_excel(xlsx_path, index=False)
-        # JSON сохраняем в виде списка записей, без индекса
         df.to_json(json_path, orient="records", force_ascii=False)
-        
-        # Создаем JSON файл в формате Битрикс24
-        bitrix24_fields = bitrix24.map_pcb_to_bitrix24_fields(parsed_dict, mistral_client=llm)
-        # Таблица с полями UF_CRM_24_* и их значениями/ID, которые уйдут в Битрикс24
+
+        # Нормализация через LLM (промпт 2) + маппинг на ID Битрикс24.
+        # Результат кэшируется: при отправке используем его повторно.
+        b24_fields = bitrix24.map_pcb_to_bitrix24_fields(parsed_dict, mistral_client=llm)
+        _bitrix24_fields = b24_fields
+
         bitrix24_df = pd.DataFrame(
-            [{"Field": k, "Value": v} for k, v in bitrix24_fields.items()]
+            [{"Field": k, "Value": v} for k, v in b24_fields.items()]
         )
-        bitrix24_payload = {
-            "entityTypeId": 182,
-            "fields": bitrix24_fields
-        }
-        with open(bitrix24_json_path, 'w', encoding='utf-8') as f:
+        bitrix24_payload = {"entityTypeId": 182, "fields": b24_fields}
+        with open(bitrix24_json_path, "w", encoding="utf-8") as f:
             json.dump(bitrix24_payload, f, ensure_ascii=False, indent=2)
-        logger.info(f"Создан JSON файл для Битрикс24: {bitrix24_json_path}")
+        logger.info("Создан JSON файл для Битрикс24: %s", bitrix24_json_path)
 
     except Exception as e:
-        logger.error("An error occurred while parsing the Excel file: %s", e)
+        logger.error("An error occurred while parsing the file: %s", e)
         error_msg = str(e)
         if "401" in error_msg or "unauthorized" in error_msg.lower():
             raise Exception(
@@ -114,57 +95,50 @@ def parse_excel_pcb(file):
                 "`MISTRAL_API_KEY` задана и ключ действителен."
             )
         if "capacity exceeded" in error_msg.lower() or "429" in error_msg:
-            raise Exception("Сервис временно недоступен из-за высокого спроса. Пожалуйста, попробуйте позже или обновите API ключ.")
-        else:
-            raise e
-    # Возвращаем:
-    # - таблицу распознанных характеристик
-    # - таблицу маппинга полей Битрикс24 (UF + ID/значения)
-    # - пути к файлам для скачивания
-    return df, bitrix24_df, csv_path, xlsx_path, json_path, bitrix24_json_path
+            raise Exception("Сервис временно недоступен из-за высокого спроса. Попробуйте позже или обновите API ключ.")
+        raise e
+
+    return (
+        gr.update(value=df,          visible=True),   # excel_parsed_reports
+        gr.update(value=bitrix24_df, visible=True),   # bitrix24_mapped_fields
+        gr.update(value=csv_path,    visible=True),   # excel_download_csv
+        gr.update(value=xlsx_path,   visible=True),   # excel_download_xlsx
+        gr.update(value=json_path,   visible=True),   # excel_download_json
+        gr.update(value=bitrix24_json_path, visible=True),  # excel_download_bitrix24_json
+    )
 
 
 def send_to_bitrix24():
     """
-    Отправляет распарсенные данные PCB в Битрикс24.
-    
-    Returns:
-        str: Сообщение о результате отправки
+    Отправляет закэшированные поля Битрикс24 без повторного запуска LLM.
     """
-    global _parsed_pcb_data
-    
-    if not _parsed_pcb_data:
+    global _bitrix24_fields
+
+    if not _bitrix24_fields:
         return "Ошибка: Сначала необходимо загрузить и распарсить файл (Excel или Word)."
-    
-    # Приоритет: webhook_url > token
+
     webhook_url = bitrix24_config.get("webhook_url", "").strip()
-    token = bitrix24_config.get("token", "").strip()
-    
+    token       = bitrix24_config.get("token", "").strip()
     webhook_url_or_token = webhook_url if webhook_url else token
-    
+
     if not webhook_url_or_token:
         return (
             "Ошибка: Webhook URL или токен Битрикс24 не задан.\n"
             "Установите переменную окружения BITRIX24_WEBHOOK_URL или BITRIX24_TOKEN.\n"
             "Формат webhook URL: https://fineline.bitrix24.ru/rest/6/<token>/crm.item.add"
         )
-    
+
     try:
         logger.info("Отправка данных в Битрикс24...")
-        result = bitrix24.send_pcb_to_bitrix24(
-            _parsed_pcb_data,
-            webhook_url_or_token,
-            mistral_client=_mistral_client,
-        )
-        
+        result = bitrix24.create_bitrix24_item(webhook_url_or_token, _bitrix24_fields)
+
         item_id = result.get("result", {}).get("item", {}).get("id")
         if item_id:
             return f"✅ Успешно отправлено в Битрикс24! ID элемента: {item_id}"
-        else:
-            return f"⚠️ Данные отправлены, но ID не получен. Ответ: {result}"
-            
+        return f"⚠️ Данные отправлены, но ID не получен. Ответ: {result}"
+
     except Exception as e:
-        logger.error(f"Ошибка при отправке в Битрикс24: {e}")
+        logger.error("Ошибка при отправке в Битрикс24: %s", e)
         error_msg = str(e)
         if "401" in error_msg or "unauthorized" in error_msg.lower():
             return "❌ Ошибка авторизации в Битрикс24. Проверьте webhook URL или токен."
@@ -257,25 +231,10 @@ def create_interface(title: str = "gradio app"):
                 excel_download_bitrix24_json,
             ],
             queue=True,
-        )
-        excel_process_btn.click(
-            show_outputs,
-            None,
-            [
-                excel_parsed_reports,
-                bitrix24_mapped_fields,
-                excel_download_csv,
-                excel_download_xlsx,
-                excel_download_json,
-                excel_download_bitrix24_json,
-            ],
-            queue=True,
-        )
-        excel_process_btn.click(
+        ).then(
             lambda: (gr.update(visible=True), gr.update(visible=True)),
             None,
             [bitrix24_status, bitrix24_send_btn],
-            queue=True
         )
         excel_input.clear(
             hide_outputs,

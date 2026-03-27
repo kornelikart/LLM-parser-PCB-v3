@@ -8,7 +8,7 @@ import os
 try:    # for running interface.py
     from model import PCBCharacteristics
     from logger import setup_logger
-except: # for running main.py
+except ImportError:  # for running main.py
     from .model import PCBCharacteristics
     from .logger import setup_logger
 
@@ -177,12 +177,12 @@ def extract_excel_data(file) -> str:
     try:
         # Read all sheets from Excel file
         excel_file = pd.ExcelFile(file)
-        logger.debug(f"Number of sheets in Excel file: {len(excel_file.sheet_names)}")
+        logger.debug("Number of sheets in Excel file: %s", len(excel_file.sheet_names))
         
         all_data = []
         for sheet_name in excel_file.sheet_names:
-            logger.debug(f"Processing sheet: {sheet_name}")
-            df = pd.read_excel(file, sheet_name=sheet_name)
+            logger.debug("Processing sheet: %s", sheet_name)
+            df = pd.read_excel(excel_file, sheet_name=sheet_name)
             
             # Remove empty rows and columns
             df_clean = df.dropna(how='all').dropna(axis=1, how='all')
@@ -194,11 +194,11 @@ def extract_excel_data(file) -> str:
         
         # Combine all sheet data
         excel_txt = "\n\n".join(all_data)
-        logger.info(f"Extracted text length: {len(excel_txt)}, Word count: {len(excel_txt.split())}")
+        logger.info("Extracted text length: %s, Word count: %s", len(excel_txt), len(excel_txt.split()))
         return excel_txt
         
     except Exception as e:
-        logger.error(f"Error reading Excel file: {e}")
+        logger.error("Error reading Excel file: %s", e)
         raise e
 
 
@@ -285,20 +285,20 @@ def process_excel_pcb_with_retry(excel_txt: str, llm_parser: ChatMistralAI, max_
     
     for attempt in range(max_retries):
         try:
-            logger.info(f"Attempting to process PCB data (attempt {attempt + 1}/{max_retries})")
+            logger.info("Attempting to process PCB data (attempt %d/%d)", attempt + 1, max_retries)
             answer = llm_parser.invoke(messages)
             logger.info("Successfully processed PCB data")
             return answer.model_dump()
-            
+
         except Exception as e:
             error_msg = str(e)
-            logger.warning(f"Attempt {attempt + 1} failed: {error_msg}")
-            
+            logger.warning("Attempt %d failed: %s", attempt + 1, error_msg)
+
             # Check if it's a rate limit error
             if "429" in error_msg or "capacity exceeded" in error_msg.lower():
                 if attempt < max_retries - 1:
                     wait_time = delay * (2 ** attempt)  # Exponential backoff
-                    logger.info(f"Rate limit exceeded. Waiting {wait_time} seconds before retry...")
+                    logger.info("Rate limit exceeded. Waiting %.1f seconds before retry...", wait_time)
                     time.sleep(wait_time)
                     continue
                 else:
@@ -306,20 +306,9 @@ def process_excel_pcb_with_retry(excel_txt: str, llm_parser: ChatMistralAI, max_
                     raise Exception("Service temporarily unavailable due to high demand. Please try again later.")
             else:
                 # For other errors, don't retry
-                logger.error(f"Non-retryable error occurred: {error_msg}")
+                logger.error("Non-retryable error: %s", error_msg)
                 raise e
     
     return None
 
 
-def process_excel_pcb(excel_txt: str, llm_parser: ChatMistralAI) -> dict:
-    """Processes Excel data for PCB characteristics using a ChatMistralAI model.
-
-    Args:
-        excel_txt (str): A string containing the Excel data to be processed.
-        llm_parser (ChatMistralAI): An instance of the ChatMistralAI model used for parsing PCB data.
-
-    Returns:
-        dict: A dictionary containing the processed PCB characteristics.
-    """
-    return process_excel_pcb_with_retry(excel_txt, llm_parser)

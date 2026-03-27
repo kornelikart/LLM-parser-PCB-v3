@@ -46,7 +46,6 @@ _DEFAULT_MISTRAL_API_KEY = "mistral_api_key"
 _env_api_key = os.getenv("MISTRAL_API_KEY", _DEFAULT_MISTRAL_API_KEY).strip()
 _bitrix24_webhook_url = os.getenv("BITRIX24_WEBHOOK_URL", "").strip()
 _bitrix24_token = os.getenv("BITRIX24_TOKEN", "").strip()
-print(f"DEBUG KEY: '{_env_api_key[:10]}...' len={len(_env_api_key)}")
 
 mistral_params = {
     "api_key": _env_api_key,

@@ -20,25 +20,35 @@ from typing import Dict, Optional
 import os
 import re
 
+_db_cache = None
+_db_cache_initialized = False
+
+
 def _try_get_db():
     """
     Lazy import to avoid hard dependency on SQLAlchemy when DB mode is not used.
-    Returns a DbDictionaries instance or None.
+    Returns a DbDictionaries instance or None. Result is cached after first call.
     """
-    if (os.getenv("USE_DB_DICTIONARIES", "1").strip() == "0"):
+    global _db_cache, _db_cache_initialized
+    if _db_cache_initialized:
+        return _db_cache
+    _db_cache_initialized = True
+    if os.getenv("USE_DB_DICTIONARIES", "1").strip() == "0":
         return None
     if not (os.getenv("DICTIONARIES_DB_URL") or "").strip():
         return None
     try:
         from .db_dictionaries import get_db_dictionaries  # type: ignore
-        return get_db_dictionaries()
-    except Exception:
-        # If running as script from app/ or SQLAlchemy is not installed yet
+        _db_cache = get_db_dictionaries()
+    except ImportError:
         try:
             from db_dictionaries import get_db_dictionaries  # type: ignore
-            return get_db_dictionaries()
+            _db_cache = get_db_dictionaries()
         except Exception:
-            return None
+            _db_cache = None
+    except Exception:
+        _db_cache = None
+    return _db_cache
 
 # Справочник 56: Materials (Материал основания платы)
 # IBLOCK_ID = 56
