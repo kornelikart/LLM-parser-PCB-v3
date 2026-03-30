@@ -3,6 +3,8 @@ import httpx
 import pandas as pd
 import logging
 import time
+import struct
+import re
 from typing import Optional, Union
 import os
 try:    # for running interface.py
@@ -107,13 +109,108 @@ def _convert_doc_to_docx(doc_path: str, out_dir: str) -> str:
     )
 
 
+def _extract_doc_text_ole(doc_path: str) -> str:
+    """Извлекает текст из .doc через OLE-парсинг (без MS Word и LibreOffice).
+    Реализует разбор piece table из Word Binary File Format (Word 97-2003).
+    """
+    try:
+        import olefile
+    except ImportError:
+        logger.debug("olefile не установлен, OLE-извлечение недоступно.")
+        return ""
+    try:
+        if not olefile.isOleFile(doc_path):
+            return ""
+        with olefile.OleFileIO(doc_path) as ole:
+            if not ole.exists("WordDocument"):
+                return ""
+            wd = ole.openstream("WordDocument").read()
+            if len(wd) < 0x01AA:
+                return ""
+
+            # FIB flags (offset 10): bit 9 (0x0200) = fWhichTblStm (0→0Table, 1→1Table)
+            flags = struct.unpack_from("<H", wd, 10)[0]
+            use_1table = bool(flags & 0x0200)
+
+            # ccpText: количество символов основного текста (offset 0x004C)
+            ccpText = struct.unpack_from("<I", wd, 0x004C)[0]
+            if not ccpText:
+                return ""
+
+            # Параметры CLX (piece table) в Table-stream
+            fcClx  = struct.unpack_from("<I", wd, 0x01A2)[0]
+            lcbClx = struct.unpack_from("<I", wd, 0x01A6)[0]
+
+            table_name = "1Table" if use_1table else "0Table"
+            if not ole.exists(table_name):
+                return ""
+            table = ole.openstream(table_name).read()
+
+            clx = table[fcClx: fcClx + lcbClx]
+
+            # Пропускаем Prc-записи (тип 0x01)
+            pos = 0
+            while pos < len(clx) and clx[pos] == 0x01:
+                cb = struct.unpack_from("<H", clx, pos + 1)[0]
+                pos += 3 + cb
+
+            # PlcPcd: тип 0x02, затем 4 байта размера, затем данные
+            if pos >= len(clx) or clx[pos] != 0x02:
+                return ""
+            pcdt_size = struct.unpack_from("<I", clx, pos + 1)[0]
+            pcdt = clx[pos + 5: pos + 5 + pcdt_size]
+
+            # Количество кусков: (размер - 4) / 12 (n+1 CP по 4 байта + n PCD по 8 байт)
+            n_pieces = (len(pcdt) - 4) // 12
+            if n_pieces <= 0:
+                return ""
+
+            cps = [struct.unpack_from("<I", pcdt, i * 4)[0] for i in range(n_pieces + 1)]
+            cp_base = (n_pieces + 1) * 4
+
+            texts = []
+            for i in range(n_pieces):
+                pcd = pcdt[cp_base + i * 8: cp_base + i * 8 + 8]
+                if len(pcd) < 8:
+                    break
+                fc_raw = struct.unpack_from("<I", pcd, 2)[0]
+                is_ansi = bool(fc_raw & 0x40000000)
+                fc = fc_raw & 0x3FFFFFFF
+                char_count = cps[i + 1] - cps[i]
+                if is_ansi:
+                    raw = wd[fc >> 1: (fc >> 1) + char_count]
+                    piece_text = raw.decode("cp1252", errors="replace")
+                else:
+                    raw = wd[fc: fc + char_count * 2]
+                    piece_text = raw.decode("utf-16-le", errors="replace")
+                texts.append(piece_text)
+
+            raw_text = "".join(texts)
+            # Убираем управляющие символы, оставляем переносы строк
+            raw_text = re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]", " ", raw_text)
+            raw_text = raw_text.replace("\r", "\n")
+            raw_text = re.sub(r" {3,}", "  ", raw_text)
+            raw_text = re.sub(r"\n{3,}", "\n\n", raw_text)
+            result = raw_text.strip()
+            if result:
+                logger.info(".doc OLE: извлечено %d символов.", len(result))
+            return result
+    except Exception as e:
+        logger.debug("OLE-извлечение .doc не удалось: %s", e)
+        return ""
+
+
 def extract_word97_data(file) -> str:
-    """Извлекает текст из Word 97–2003 (.doc). Пробует Win32 COM (Word), затем конвертацию в .docx."""
+    """Извлекает текст из Word 97–2003 (.doc).
+    Порядок: Win32 COM → LibreOffice/doc2docx → OLE-парсинг (pure Python).
+    """
     import os
     import sys
     path = _get_file_path(file)
     path = os.path.abspath(path)
     logger.info("Извлечение данных из Word 97-2003 (.doc).")
+
+    # 1) Win32 COM через установленный MS Word
     if sys.platform == "win32":
         try:
             import win32com.client
@@ -124,7 +221,7 @@ def extract_word97_data(file) -> str:
                 try:
                     text = doc.Content.Text
                     if text and text.strip():
-                        logger.info("Word 97-2003: текст извлечён через MS Word (COM).")
+                        logger.info(".doc: текст извлечён через MS Word (COM).")
                         return text.strip()
                 finally:
                     doc.Close(False)
@@ -132,16 +229,31 @@ def extract_word97_data(file) -> str:
                 word.Quit()
         except Exception as e:
             logger.debug("Извлечение .doc через Word COM не удалось: %s", e)
+
+    # 2) LibreOffice / doc2docx — конвертация в .docx
     import shutil
     import tempfile
-    tmpdir = tempfile.mkdtemp()
     try:
-        doc_copy = os.path.join(tmpdir, "input.doc")
-        shutil.copy2(path, doc_copy)
-        docx_path = _convert_doc_to_docx(doc_copy, tmpdir)
-        return extract_word_data(docx_path)
-    finally:
-        shutil.rmtree(tmpdir, ignore_errors=True)
+        tmpdir = tempfile.mkdtemp()
+        try:
+            doc_copy = os.path.join(tmpdir, "input.doc")
+            shutil.copy2(path, doc_copy)
+            docx_path = _convert_doc_to_docx(doc_copy, tmpdir)
+            return extract_word_data(docx_path)
+        finally:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+    except Exception as e:
+        logger.debug("Конвертация .doc не удалась: %s", e)
+
+    # 3) Pure-Python OLE-парсинг (без внешних инструментов)
+    text = _extract_doc_text_ole(path)
+    if text:
+        logger.info(".doc: текст извлечён через OLE-парсинг.")
+        return text
+
+    raise RuntimeError(
+        "Не удалось прочитать .doc файл. Пожалуйста, пересохраните документ как .docx в Microsoft Word."
+    )
 
 
 def extract_document_data(file) -> str:
@@ -308,7 +420,7 @@ def process_excel_pcb_with_retry(excel_txt: str, llm_parser: ChatMistralAI, max_
                 # For other errors, don't retry
                 logger.error("Non-retryable error: %s", error_msg)
                 raise e
-    
-    return None
+
+    raise RuntimeError("Не удалось обработать данные PCB после всех попыток.")
 
 

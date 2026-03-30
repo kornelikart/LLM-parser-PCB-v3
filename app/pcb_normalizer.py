@@ -218,10 +218,11 @@ def _build_normalization_prompt(raw: dict[str, Any]) -> str:
     Формирует промпт для второго вызова LLM.
     Передаёт только поля, требующие нормализации, и полный список допустимых значений.
     """
+    # Только поля, нормализуемые через LLM. Yes/No-поля (edge_plating, peelable_mask,
+    # gold_fingers) не включаем — они маппятся напрямую в map_to_bitrix24_ids().
     relevant = {
         k: raw[k] for k in (
-            "coverage_type", "foil_thickness", "base_material", "pcb_type",
-            "edge_plating", "peelable_mask", "gold_fingers", "ipc_class",
+            "coverage_type", "foil_thickness", "base_material", "pcb_type", "ipc_class",
         ) if raw.get(k)
     }
 
@@ -243,35 +244,45 @@ finish_type (field: coverage_type):
 {json.dumps(finish_keys, ensure_ascii=False)}
 
 Mapping hints for finish_type:
-- "ENIG", "Immersion Gold", "Chem.Ni/Au", "ENiG"        → "Imm. gold (chem.Ni/Au)"
-- "HASL", "Hot Air Solder", "SnPb HASL"                  → "HASL (PbSn)"
-- "HASL LF", "Lead-free HASL", "RoHS HASL", "HASL(LF)"  → "HASL LF"
-- "IAg", "Imm Silver", "Chem.Ag"                         → "Imm. silver (chem. Ag)"
-- "ISn", "Imm Tin", "Chem.Sn"                            → "Imm. tin (chem. Sn)"
-- "Hard Gold", "Galv. Gold", "Electrolytic Gold"         → "Hard gold (Galv. Au)"
-- "Soft Gold", "Electroless Gold", "Au"                  → "Soft gold"
-- "OSP", "Organic Coating"                               → "OSP"
-- "ENEPIG"                                               → "ENEPIG"
-- "Flash Gold"                                           → "Flash gold"
-- "no coating", "bare copper", "uncoated"                → "No Coating"
-- "none", "—", "N/A" (when no finish at all)             → "None"
+- "ENIG", "Immersion Gold", "Chem.Ni/Au", "ENiG",
+  "Иммерсионное золото", "Хим. золото", "ХНПДЗ", "Chem. Au"    → "Imm. gold (chem.Ni/Au)"
+- "HASL", "Hot Air Solder", "SnPb HASL", "Горячее лужение",
+  "Оплавление", "ХПОС", "ПОС"                                  → "HASL (PbSn)"
+- "HASL LF", "Lead-free HASL", "RoHS HASL", "HASL(LF)",
+  "Бессвинцовый HASL", "БОС", "HAL LF"                        → "HASL LF"
+- "IAg", "Imm Silver", "Chem.Ag", "Химическое серебро",
+  "Иммерсионное серебро"                                        → "Imm. silver (chem. Ag)"
+- "ISn", "Imm Tin", "Chem.Sn", "Химическое олово",
+  "Иммерсионное олово"                                          → "Imm. tin (chem. Sn)"
+- "Hard Gold", "Galv. Gold", "Electrolytic Gold",
+  "Гальваническое золото", "Твёрдое золото"                    → "Hard gold (Galv. Au)"
+- "Soft Gold", "Electroless Gold", "Au flash",
+  "Мягкое золото"                                               → "Soft gold"
+- "OSP", "Organic Coating", "ОСП", "Органическое покрытие"    → "OSP"
+- "ENEPIG"                                                      → "ENEPIG"
+- "Flash Gold", "Flash Au"                                      → "Flash gold"
+- "no coating", "bare copper", "uncoated", "без покрытия"      → "No Coating"
+- "none", "—", "N/A", "не указано" (no finish at all)          → "None"
 
 copper_thickness (field: foil_thickness):
 {json.dumps(copper_keys, ensure_ascii=False)}
 
 Mapping hints for copper_thickness:
-- "35 um", "35µm", "35 micron", "1oz", "1 oz"           → "1 OZ (35 um)"
-- "70 um", "70µm", "2oz", "2 oz"                        → "2 OZ (70 um)"
-- "17.5 um", "18 um", "0.5oz", "0.5 oz", "half oz"     → "0.5 OZ (17 um)"
-- "105 um", "3oz", "3 oz"                               → "3 OZ (105 um)"
-- "52 um", "52.5 um", "1.5oz", "1.5 oz"                → "1.5 OZ (52um)"
-- "140 um", "4oz"                                        → "4 OZ (140 um)"
-- "175 um", "5oz"                                        → "5 OZ (175 um)"
-- "210 um", "6oz"                                        → "6 OZ (210 um)"
-- "8.75 um", "0.25oz", "1/4 oz"                         → "1/4 OZ (8.75 um)"
-- "4.375 um", "0.125oz", "1/8 oz"                       → "1/8 OZ (4.375 um)"
-- "12 um", "0.33oz"                                      → "0.33 OZ (12 um)"
-- For composite strings like "Top: 35µm, Inner: 17µm"   → use outer layer value
+- "35 um", "35µm", "35 мкм", "35 мк", "1oz", "1 oz", "1 унция"   → "1 OZ (35 um)"
+- "70 um", "70µm", "70 мкм", "2oz", "2 oz"                        → "2 OZ (70 um)"
+- "17 um", "17.5 um", "18 um", "18µm", "17 мкм", "18 мкм",
+  "0.5oz", "0.5 oz", "half oz", "½ oz"                            → "0.5 OZ (17 um)"
+- "105 um", "105 мкм", "3oz", "3 oz"                              → "3 OZ (105 um)"
+- "52 um", "52.5 um", "52 мкм", "1.5oz", "1.5 oz"                → "1.5 OZ (52um)"
+- "140 um", "140 мкм", "4oz"                                       → "4 OZ (140 um)"
+- "175 um", "175 мкм", "5oz"                                       → "5 OZ (175 um)"
+- "210 um", "210 мкм", "6oz"                                       → "6 OZ (210 um)"
+- "8.75 um", "0.25oz", "1/4 oz", "¼ oz"                           → "1/4 OZ (8.75 um)"
+- "4.375 um", "0.125oz", "1/8 oz"                                  → "1/8 OZ (4.375 um)"
+- "12 um", "12 мкм", "0.33oz"                                      → "0.33 OZ (12 um)"
+- Composite: "18 µm base + 17 µm plating", "18+17", "Cu 18+17.5" → sum ≈ 35 µm → "1 OZ (35 um)"
+- Composite: "Top: 35µm, Inner: 17µm", "Outer 35 / Inner 17"     → use outer (largest) value → "1 OZ (35 um)"
+- If only one number given (e.g. "35"), interpret as µm and map accordingly
 
 base_material (field: base_material):
 {json.dumps(material_keys, ensure_ascii=False)}

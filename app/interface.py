@@ -45,6 +45,10 @@ def parse_excel_pcb(file):
     для извлечения характеристик ПП и сохраняет результаты в CSV, Excel и JSON.
     """
     global _parsed_pcb_data, _mistral_client, _bitrix24_fields
+    # Сбрасываем кэш предыдущего файла, чтобы не отправить старые данные при ошибке
+    _bitrix24_fields = None
+    _parsed_pcb_data = None
+
     if isinstance(file, list) and file:
         file = file[0]
     logger.info("Starting to parse file for PCB characteristics: %s", getattr(file, "name", file))

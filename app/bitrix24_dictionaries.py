@@ -273,31 +273,6 @@ PRODUCTION_UNIT_DICT: Dict[str, int] = {
     "панель": 6272,
 }
 
-# Справочник 64: Solder Mask Color (Цвет паяльной маски). ID уточните в Битрикс24.
-SOLDER_MASK_COLOR_DICT: Dict[str, int] = {
-    "green": 8002,
-    "Green": 8002,
-    "red": 8002,
-    "Red": 8002,
-    "blue": 8002,
-    "Blue": 8002,
-    "black": 8002,
-    "Black": 8002,
-    "white": 8002,
-    "White": 8002,
-    "yellow": 8002,
-    "Yellow": 8002,
-}
-
-# Справочник 66: SilkScreen Color (Цвет маркировки). ID уточните в Битрикс24.
-SILKSCREEN_COLOR_DICT: Dict[str, int] = {
-    "white": 7002,
-    "White": 7002,
-    "black": 7002,
-    "Black": 7002,
-    "green": 7002,
-    "Green": 7002,
-}
 
 # Справочник 72: Edge plating (Металлизация края)
 EDGE_PLATING_DICT: Dict[str, int] = {
@@ -466,22 +441,6 @@ def get_production_unit_id(unit_text: str) -> Optional[int]:
     if db:
         return db.find_item_id(160, unit_text)
     return find_item_id(unit_text, PRODUCTION_UNIT_DICT)
-
-
-def get_solder_mask_color_id(color_text: str) -> Optional[int]:
-    """Получить ID цвета паяльной маски из справочника 64"""
-    db = _try_get_db()
-    if db:
-        return db.find_item_id(64, color_text)
-    return find_item_id(color_text, SOLDER_MASK_COLOR_DICT)
-
-
-def get_silkscreen_color_id(color_text: str) -> Optional[int]:
-    """Получить ID цвета маркировки из справочника 66"""
-    db = _try_get_db()
-    if db:
-        return db.find_item_id(66, color_text)
-    return find_item_id(color_text, SILKSCREEN_COLOR_DICT)
 
 
 def get_edge_plating_id(plating_text: str) -> Optional[int]:

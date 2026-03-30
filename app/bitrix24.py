@@ -88,7 +88,10 @@ class _MistralChatAdapter:
             client=http_client,
             model_kwargs=model_kwargs,
         )
-        ai_msg = llm.invoke(lc_messages)
+        try:
+            ai_msg = llm.invoke(lc_messages)
+        finally:
+            http_client.close()
         content = getattr(ai_msg, "content", None) or str(ai_msg)
 
         # Снимаем markdown-обёртку (```json ... ```) если модель её добавила
@@ -213,20 +216,8 @@ def map_pcb_to_bitrix24_fields(pcb_data: Dict[str, Any], mistral_client: Any = N
         raise ValueError("Не задано обязательное поле 'board_name' (OEM PN) для заявки в Битрикс24.")
     fields["ufCrm24_1709799376061"] = board_name
     
-    # OEM Description (обязательное) - комбинируем несколько полей
-    description_parts = []
-    if pcb_data.get("base_material"):
-        description_parts.append(f"Material: {pcb_data['base_material']}")
-    if pcb_data.get("layer_count"):
-        description_parts.append(f"Layers: {pcb_data['layer_count']}")
-    if pcb_data.get("coverage_type"):
-        description_parts.append(f"Finish: {pcb_data['coverage_type']}")
-    if not description_parts:
-        raise ValueError(
-            "Не удалось сформировать обязательное поле OEM Description для Битрикс24. "
-            "Нужно как минимум одно из полей: base_material, layer_count, coverage_type."
-        )
-    fields["ufCrm24_1709799393816"] = ", ".join(description_parts)
+    # OEM Description (обязательное) - дублируем OEM PN
+    fields["ufCrm24_1709799393816"] = board_name
     
     # Rev. (обязательное)
     fields["ufCrm24_1709799420584"] = ""

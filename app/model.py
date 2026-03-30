@@ -23,7 +23,11 @@ class PCBCharacteristics(BaseModel):
 
     foil_thickness: str = Field(
         default="",
-        description="Толщина фольги"
+        description=(
+            "Толщина медной фольги внешних слоёв (CU foil thickness / Thickness CU / Толщина меди). "
+            "Примеры: '1 OZ (35 мкм)', '35 мкм', '0.5 oz', '17.5 µm', '18 um + 17 um plating'. "
+            "Указывать точно как в документе, включая единицы измерения."
+        )
     )
     
     layer_count: int = Field(
@@ -33,7 +37,12 @@ class PCBCharacteristics(BaseModel):
 
     coverage_type: str = Field(
         default="",
-        description="Финишное покрытие площадок"
+        description=(
+            "Финишное покрытие поверхности платы (Surface Finish / Финишное покрытие). "
+            "Примеры: ENIG, HASL, HASL LF, OSP, Imm. gold, Imm. silver, Imm. tin, "
+            "Hard gold, Soft gold, ENEPIG, Иммерсионное золото, Химическое олово, ОСП. "
+            "Указывать точно как в документе."
+        )
     )
     
     board_size: str = Field(
