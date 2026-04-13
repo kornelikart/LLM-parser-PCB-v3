@@ -24,9 +24,10 @@ class PCBCharacteristics(BaseModel):
     foil_thickness: str = Field(
         default="",
         description=(
-            "Толщина медной фольги внешних слоёв (CU foil thickness / Thickness CU / Толщина меди). "
-            "Примеры: '1 OZ (35 мкм)', '35 мкм', '0.5 oz', '17.5 µm', '18 um + 17 um plating'. "
-            "Указывать точно как в документе, включая единицы измерения."
+            "Толщина МЕДНОЙ ФОЛЬГИ внешних слоёв (CU foil / Copper thickness / Толщина меди / Thickness CU). "
+            "Значение может быть в мм (0.018 мм = 18 мкм = 0.5 oz) или в мкм/OZ. "
+            "ВАЖНО: НЕ путать с толщиной маски (Solder mask / Маска) — маску игнорировать. "
+            "Примеры: '0.018 мм', '35 мкм', '1 OZ (35 мкм)', '0.5 oz', '18 um + 17 um plating'."
         )
     )
     

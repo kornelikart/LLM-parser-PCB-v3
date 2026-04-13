@@ -267,10 +267,25 @@ Mapping hints for finish_type:
 copper_thickness (field: foil_thickness):
 {json.dumps(copper_keys, ensure_ascii=False)}
 
-Mapping hints for copper_thickness:
-- "35 um", "35µm", "35 мкм", "35 мк", "1oz", "1 oz", "1 унция"   → "1 OZ (35 um)"
+IMPORTANT for copper_thickness:
+- The value may be in µm/um/мкм OR in mm/мм. Convert mm → µm (×1000) before mapping.
+- 0.018 mm = 18 µm = 0.5 OZ. Do NOT confuse with solder mask thickness.
+- Ignore any solder mask / маска values — extract ONLY copper foil thickness.
+
+Mapping hints for copper_thickness (mm-notation → canonical):
+- "0.009 мм", "0.009mm", "0,009"                                   → "1/4 OZ (8.75 um)"
+- "0.012 мм", "0.012mm", "0,012"                                   → "0.33 OZ (12 um)"
+- "0.018 мм", "0.018mm", "0,018", "18 мкм"                        → "0.5 OZ (17 um)"
+- "0.035 мм", "0.035mm", "0,035", "35 мкм"                        → "1 OZ (35 um)"
+- "0.050 мм", "0.050mm", "0,050", "0.052 мм", "52 мкм"            → "1.5 OZ (52um)"
+- "0.070 мм", "0.070mm", "0,070", "70 мкм"                        → "2 OZ (70 um)"
+- "0.105 мм", "0.105mm", "0,105", "105 мкм"                       → "3 OZ (105 um)"
+- "0.140 мм", "0.140mm", "0,140", "140 мкм"                       → "4 OZ (140 um)"
+
+Mapping hints (µm/OZ-notation):
+- "35 um", "35µm", "35 мкм", "1oz", "1 oz", "1 унция"            → "1 OZ (35 um)"
 - "70 um", "70µm", "70 мкм", "2oz", "2 oz"                        → "2 OZ (70 um)"
-- "17 um", "17.5 um", "18 um", "18µm", "17 мкм", "18 мкм",
+- "17 um", "17.5 um", "18 um", "18µm", "17 мкм",
   "0.5oz", "0.5 oz", "half oz", "½ oz"                            → "0.5 OZ (17 um)"
 - "105 um", "105 мкм", "3oz", "3 oz"                              → "3 OZ (105 um)"
 - "52 um", "52.5 um", "52 мкм", "1.5oz", "1.5 oz"                → "1.5 OZ (52um)"
@@ -280,9 +295,9 @@ Mapping hints for copper_thickness:
 - "8.75 um", "0.25oz", "1/4 oz", "¼ oz"                           → "1/4 OZ (8.75 um)"
 - "4.375 um", "0.125oz", "1/8 oz"                                  → "1/8 OZ (4.375 um)"
 - "12 um", "12 мкм", "0.33oz"                                      → "0.33 OZ (12 um)"
-- Composite: "18 µm base + 17 µm plating", "18+17", "Cu 18+17.5" → sum ≈ 35 µm → "1 OZ (35 um)"
-- Composite: "Top: 35µm, Inner: 17µm", "Outer 35 / Inner 17"     → use outer (largest) value → "1 OZ (35 um)"
-- If only one number given (e.g. "35"), interpret as µm and map accordingly
+- Composite "18µm base + 17µm plating" or "0.018+0.017 мм"        → sum = 35µm → "1 OZ (35 um)"
+- Composite "Top: 35µm, Inner: 17µm"                               → outer value → "1 OZ (35 um)"
+- Single number without unit (e.g. "35")                           → interpret as µm
 
 base_material (field: base_material):
 {json.dumps(material_keys, ensure_ascii=False)}

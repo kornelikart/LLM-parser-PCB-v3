@@ -220,7 +220,7 @@ def map_pcb_to_bitrix24_fields(pcb_data: Dict[str, Any], mistral_client: Any = N
     fields["ufCrm24_1709799393816"] = board_name
     
     # Rev. (обязательное)
-    fields["ufCrm24_1709799420584"] = ""
+    fields["ufCrm24_1709799420584"] = "."
     
     # Board Thickness (обязательное double) - без значения не отправляем данные
     # Берём из pcb_data["board_thickness"] (Finished thickness with tolerance, mm)
@@ -315,10 +315,9 @@ def map_pcb_to_bitrix24_fields(pcb_data: Dict[str, Any], mistral_client: Any = N
     if pcb_data.get("board_size"):
         try:
             size_str = (pcb_data["board_size"] or "").replace(",", ".")
-            numbers = re.findall(r"\d+(?:\.\d+)?", size_str)
-            parts = [float(n) for n in numbers if n]
-            # Берём первые два числа в разумном диапазоне для мм (0.5–2000), чтобы отсечь допуск 0.2
-            valid = [p for p in parts if 0.5 <= p <= 2000]
+            parts = [float(n) for n in re.findall(r"\d+(?:\.\d+)?", size_str)]
+            # Отсекаем допуски (< 5) и нереальные значения (> 2000 мм)
+            valid = [p for p in parts if 5 <= p <= 2000]
             if len(valid) >= 2:
                 bl, bw = valid[0], valid[1]
                 fields["ufCrm24_1708353384301"] = bl                          # Board Length (mm)
@@ -327,13 +326,15 @@ def map_pcb_to_bitrix24_fields(pcb_data: Dict[str, Any], mistral_client: Any = N
         except Exception as e:
             logger.debug("Не удалось распарсить размер платы: %s", e)
 
-    # Парсинг панелизации — так же по числам
+    # Парсинг панелизации.
+    # Строки вида "2 x 3 (200 x 150) ±0.3" содержат счётчики рядов/столбцов (2,3)
+    # и реальные размеры панели (200, 150). Используем порог >= 20 мм, чтобы
+    # счётчики (1–10) и допуски (0.x–1.x) не попали в размеры.
     if pcb_data.get("panelization"):
         try:
             panel_str = (pcb_data["panelization"] or "").replace(",", ".")
-            numbers = re.findall(r"\d+(?:\.\d+)?", panel_str)
-            parts = [float(n) for n in numbers if n]
-            valid = [p for p in parts if 0.5 <= p <= 2000]
+            parts = [float(n) for n in re.findall(r"\d+(?:\.\d+)?", panel_str)]
+            valid = [p for p in parts if 20 <= p <= 2000]
             if len(valid) >= 2:
                 pl, pw = valid[0], valid[1]
                 fields["ufCrm24_1708375852081"] = pl                          # Panel Length (mm)

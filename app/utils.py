@@ -344,8 +344,11 @@ def create_pcb_model(params: dict[str, str]) -> ChatMistralAI:
     base_url = (os.getenv("MISTRAL_BASE_URL") or "").strip() or "https://api.mistral.ai/v1"
     http_client = httpx.Client(
         base_url=base_url,
-        timeout=30.0,
-        trust_env=False,
+        # Увеличен timeout: LLM-ответы для больших документов могут занимать > 30 сек.
+        timeout=httpx.Timeout(connect=15.0, read=120.0, write=30.0, pool=15.0),
+        # trust_env=True — разрешаем системные proxy (важно в корпоративных сетях).
+        # WinError 10061 (отказ подключения) → проверьте MISTRAL_BASE_URL или proxy-настройки.
+        trust_env=True,
         headers={
             "Authorization": f"Bearer {api_key}",
             "Content-Type": "application/json",
@@ -404,20 +407,34 @@ def process_excel_pcb_with_retry(excel_txt: str, llm_parser: ChatMistralAI, max_
 
         except Exception as e:
             error_msg = str(e)
-            logger.warning("Attempt %d failed: %s", attempt + 1, error_msg)
+            logger.warning("Attempt %d/%d failed: %s", attempt + 1, max_retries, error_msg)
 
-            # Check if it's a rate limit error
-            if "429" in error_msg or "capacity exceeded" in error_msg.lower():
+            # Определяем тип ошибки
+            is_rate_limit = "429" in error_msg or "capacity exceeded" in error_msg.lower()
+            # WinError 10054 = connection reset, 10061 = connection refused — временные сетевые сбои
+            is_network_error = any(x in error_msg for x in (
+                "10054", "10061", "ReadError", "ConnectError",
+                "TimeoutException", "RemoteProtocolError", "ConnectionReset",
+                "Connection reset", "forcibly closed",
+            ))
+
+            if is_rate_limit or is_network_error:
                 if attempt < max_retries - 1:
                     wait_time = delay * (2 ** attempt)  # Exponential backoff
-                    logger.info("Rate limit exceeded. Waiting %.1f seconds before retry...", wait_time)
+                    reason = "Rate limit" if is_rate_limit else "Network error"
+                    logger.info("%s. Retry in %.1f sec...", reason, wait_time)
                     time.sleep(wait_time)
                     continue
                 else:
-                    logger.error("All retry attempts failed due to rate limiting")
-                    raise Exception("Service temporarily unavailable due to high demand. Please try again later.")
+                    logger.error("All %d attempts failed.", max_retries)
+                    if is_rate_limit:
+                        raise Exception("Сервис временно недоступен (превышен лимит запросов). Попробуйте позже.")
+                    raise Exception(
+                        f"Ошибка сети при обращении к Mistral API: {error_msg}\n"
+                        "Проверьте интернет-соединение и настройки proxy/антивируса."
+                    )
             else:
-                # For other errors, don't retry
+                # Нереентерабельная ошибка (неверный ключ, невалидный запрос и т.д.)
                 logger.error("Non-retryable error: %s", error_msg)
                 raise e
 
