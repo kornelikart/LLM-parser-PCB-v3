@@ -1,8 +1,15 @@
-venv/ 
-__pycache__/ 
-*.pyc 
-.env 
-logs.log 
-"*.log" 
-".DS_Store" 
-"Thumbs.db" 
+venv/
+__pycache__/
+*.pyc
+.env
+logs.log
+*.log
+.DS_Store
+Thumbs.db
+
+# Реальные спецификации заказчиков и результаты eval-прогонов не коммитим
+eval/data/
+eval/results/
+
+# Выгрузка структуры полей конкретного портала Битрикс24
+tools/bitrix24_fields.json

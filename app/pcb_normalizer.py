@@ -5,6 +5,11 @@ import logging
 import re
 from typing import Any, Optional
 
+try:
+    from bitrix24_api import get_bitrix24_api
+except ImportError:
+    from .bitrix24_api import get_bitrix24_api
+
 logger = logging.getLogger(__name__)
 
 # ═══════════════════════════════════════════════════════════════════
@@ -204,6 +209,74 @@ LAYERS: dict[str, int] = {
 }
 
 # ═══════════════════════════════════════════════════════════════════
+# ЖИВЫЕ СПРАВОЧНИКИ
+# Словари выше — снимок на момент написания кода. Если задан webhook,
+# значения берутся напрямую из Битрикс24: новые элементы справочника
+# (например, добавленный тип покрытия) сразу попадают и в промпт
+# нормализации, и в маппинг, без правки кода.
+# ═══════════════════════════════════════════════════════════════════
+
+# ключ → (статический словарь, IBLOCK_ID справочника в Битрикс24)
+_DICT_SOURCES: dict[str, tuple[dict, Optional[int]]] = {
+    "finish_type":          (FINISH_TYPE, 74),
+    "copper":               (COPPER, 62),
+    "materials":            (MATERIALS, 56),
+    "pcb_type":             (PCB_TYPE, 52),
+    "order_unit":           (ORDER_UNIT, 50),
+    "peelable_sm":          (PEELABLE_SM, 86),
+    "production_unit":      (PRODUCTION_UNIT, 160),
+    "edge_plating":         (EDGE_PLATING, 72),
+    "gold_fingers":         (GOLD_FINGERS, 70),
+    "back_drill":           (BACK_DRILL, 230),
+    "coin":                 (COIN, 232),
+    "embedded_components":  (EMBEDDED_COMPONENTS, 234),
+    "flex_type":            (FLEX_TYPE, 108),
+    "cover_layer":          (COVER_LAYER, 110),
+    "flex_layer_location":  (FLEX_LAYER_LOCATION, 236),
+    "shelf_life":           (SHELF_LIFE, 66),
+    "layers":               (LAYERS, 54),
+    # Поля без IBLOCK_ID в документации: значения тянутся по коду поля.
+    "ipc_class":            (IPC_CLASS, None),
+    "outer_copper":         (OUTER_COPPER_FROM_COPPER, None),
+}
+
+# Для справочников без IBLOCK_ID значения берутся по коду поля.
+_FIELD_CODE_SOURCES: dict[str, str] = {
+    "ipc_class":    "ufCrm24_1707841162",
+    "outer_copper": "ufCrm24_1707849930",
+}
+
+
+def get_dict(name: str) -> dict[str, int]:
+    """Справочник по ключу: живой из Битрикс24, при недоступности — статический.
+
+    Живой справочник ДОПОЛНЯЕТ статический, а не заменяет: значения с сервера
+    имеют приоритет, но локальные синонимы (важные для fuzzy-маппинга)
+    сохраняются, если их имена не пересекаются.
+    """
+    static, iblock_id = _DICT_SOURCES.get(name, ({}, None))
+    api = get_bitrix24_api()
+    if not api:
+        return static
+
+    try:
+        if iblock_id:
+            live = api.get_dictionary(iblock_id)
+        else:
+            code = _FIELD_CODE_SOURCES.get(name)
+            live = api.get_field_values(code) if code else {}
+    except Exception as e:
+        logger.warning("Справочник '%s' не получен из Битрикс24 (%s), берём статический.", name, e)
+        return static
+
+    if not live:
+        return static
+    merged = dict(static)
+    merged.update(live)
+    return merged
+
+
+# ═══════════════════════════════════════════════════════════════════
 # ПРОМПТ НОРМАЛИЗАЦИИ
 # ═══════════════════════════════════════════════════════════════════
 
@@ -226,11 +299,13 @@ def _build_normalization_prompt(raw: dict[str, Any]) -> str:
         ) if raw.get(k)
     }
 
-    finish_keys   = list(FINISH_TYPE.keys())
-    copper_keys   = list(COPPER.keys())
-    material_keys = list(MATERIALS.keys())
-    pcb_type_keys = list(PCB_TYPE.keys())
-    ipc_class_keys = list(IPC_CLASS.keys())
+    # Списки допустимых значений берутся из живых справочников Битрикс24,
+    # поэтому добавленные на портале элементы сразу доступны модели.
+    finish_keys    = list(get_dict("finish_type").keys())
+    copper_keys    = list(get_dict("copper").keys())
+    material_keys  = list(get_dict("materials").keys())
+    pcb_type_keys  = list(get_dict("pcb_type").keys())
+    ipc_class_keys = list(get_dict("ipc_class").keys())
 
     return f"""Map the raw PCB data below to EXACTLY ONE canonical value per field.
 Copy the value verbatim from the allowed list, or return null if nothing fits.
@@ -245,15 +320,20 @@ finish_type (field: coverage_type):
 
 Mapping hints for finish_type:
 - "ENIG", "Immersion Gold", "Chem.Ni/Au", "ENiG",
-  "Иммерсионное золото", "Хим. золото", "ХНПДЗ", "Chem. Au"    → "Imm. gold (chem.Ni/Au)"
+  "Иммерсионное золото", "Хим. золото", "ХНПДЗ", "Chem. Au",
+  "Хим.Н5 Зл0,1", "Хим. Н.5 Зл.0.1", "Ni5 Au0,1", "Ni5 Au0.1"  → "Imm. gold (chem.Ni/Au)"
 - "HASL", "Hot Air Solder", "SnPb HASL", "Горячее лужение",
-  "Оплавление", "ХПОС", "ПОС"                                  → "HASL (PbSn)"
+  "Оплавление", "ХПОС", "ПОС", "ПОС-63", "ПОС-63HAL", "пос-63",
+  "Гор.Пос.", "Гор.ПОС", "HAL SnPb"                            → "HASL (PbSn)"
 - "HASL LF", "Lead-free HASL", "RoHS HASL", "HASL(LF)",
   "Бессвинцовый HASL", "БОС", "HAL LF"                        → "HASL LF"
 - "IAg", "Imm Silver", "Chem.Ag", "Химическое серебро",
-  "Иммерсионное серебро"                                        → "Imm. silver (chem. Ag)"
-- "ISn", "Imm Tin", "Chem.Sn", "Химическое олово",
-  "Иммерсионное олово"                                          → "Imm. tin (chem. Sn)"
+  "Иммерсионное серебро", "imAg"                                → "Imm. silver (chem. Ag)"
+- "ISn", "Imm Tin", "ImmSn", "Immersion Tin", "Chem.Sn",
+  "Химическое олово", "Иммерсионное олово", "иммерс. олово"    → "Imm. tin (chem. Sn)"
+- Combined finish: additions like "+ Carbon" ignore, map by the base finish
+  ("ПОС-63HAL + Carbon" → "HASL (PbSn)"); TWO real finishes combined
+  ("ПОС-63HAL + ImAu")                                          → "MIX"
 - "Hard Gold", "Galv. Gold", "Electrolytic Gold",
   "Гальваническое золото", "Твёрдое золото"                    → "Hard gold (Galv. Au)"
 - "Soft Gold", "Electroless Gold", "Au flash",
@@ -307,11 +387,13 @@ IMPORTANT: Only map to FR4 variants if the text clearly says "FR4" or "FR-4".
 Do NOT map other materials (F4BM, PTFE, ceramic-filled, etc.) to FR4.
 If the material name does not clearly match any entry in the list → use "MIX/Others".
 
-- "FR4", "FR-4" (must explicitly say FR4/FR-4, no TG specified)  → "FR4 TG-180"
-- "FR4 TG135", "FR-4 TG-135"                                     → "FR4 TG-135"
-- "FR4 TG150", "FR-4 TG-150"                                     → "FR4 TG-150"
-- "FR4 TG170", "FR-4 TG-170"                                     → "FR4 TG-170"
-- "FR4 TG180", "High Tg FR4", "FR-4 (High TG)"                  → "FR4 TG-180"
+- "FR4", "FR-4", "FR4 типовой" (explicitly FR4, no TG specified) → "FR4 TG-180"
+- "FR4 TG135", "FR-4 TG-135", "FR4 tg135"                        → "FR4 TG-135"
+- "FR4 TG150", "FR-4 TG-150", "FR4, Tg≥150", "Tg 150"           → "FR4 TG-150"
+- "FR4 TG170", "FR-4 TG-170", "FR4 HiTg (Tg≥170°C)", "Tg≥170"  → "FR4 TG-170"
+- "FR4 TG180", "High Tg FR4", "FR-4 (High TG)",
+  "IT180A", "IT-180A", "ITEQ IT-180" (Tg=180 laminate)           → "FR4 TG-180"
+- If an explicit Tg number is given, prefer it over generic "High Tg".
 - "Polyimide", "PI", "Kapton"                                     → "Polyimide"
 - "Rogers 4003C", "RO4003", "RO4003C"                            → "Rogers 4003"
 - "Rogers 4350B", "RO4350", "RO4350B"                            → "Rogers 4350"
@@ -323,10 +405,10 @@ pcb_type (field: pcb_type):
 {json.dumps(pcb_type_keys, ensure_ascii=False)}
 
 Mapping hints for pcb_type:
-- "Rigid", "standard", not specified                     → "Rigid"
-- "Flex", "flexible", "FPC"                             → "Flex"
-- "Rigid-Flex", "Rigid Flex"                            → "Flex+Rigid"
-- "Semi-Flex", "semiflex"                               → "Semi-Flex"
+- "Rigid", "standard", "Жесткая", "жесткий", not specified → "Rigid"
+- "Flex", "flexible", "FPC", "Гибкая", "ГПК"              → "Flex"
+- "Rigid-Flex", "Rigid Flex", "Гибко-жесткая"             → "Flex+Rigid"
+- "Semi-Flex", "semiflex"                                  → "Semi-Flex"
 
 ipc_class (field: ipc_class):
 {json.dumps(ipc_class_keys, ensure_ascii=False)}
@@ -393,11 +475,11 @@ def normalize_pcb_data(raw: dict[str, Any], mistral_client: Any) -> dict[str, An
 def _validate_normalized(normalized: dict) -> None:
     """Проверяет, что LLM вернул только допустимые значения; обнуляет невалидные."""
     checks = {
-        "finish_type":      FINISH_TYPE,
-        "copper_thickness": COPPER,
-        "base_material":    MATERIALS,
-        "pcb_type":         PCB_TYPE,
-        "ipc_class":        IPC_CLASS,
+        "finish_type":      get_dict("finish_type"),
+        "copper_thickness": get_dict("copper"),
+        "base_material":    get_dict("materials"),
+        "pcb_type":         get_dict("pcb_type"),
+        "ipc_class":        get_dict("ipc_class"),
     }
     for field, canon_dict in checks.items():
         val = normalized.get(field)
@@ -446,32 +528,34 @@ def map_to_bitrix24_ids(enriched: dict[str, Any]) -> dict[str, int]:
     # ── Поля из промпта 2 (LLM-нормализованные) ──────────────────
 
     if finish := normalized.get("finish_type"):
-        if (v := FINISH_TYPE.get(finish)) is not None:
+        if (v := get_dict("finish_type").get(finish)) is not None:
             ids["ufCrm24_1707768819"] = v
 
     if copper := normalized.get("copper_thickness"):
-        if (v := COPPER.get(copper)) is not None:
+        if (v := get_dict("copper").get(copper)) is not None:
             ids["ufCrm24_1707838441"] = v                    # Max Copper (base OZ)
-        if (v := OUTER_COPPER_FROM_COPPER.get(copper)) is not None:
+        if (v := get_dict("outer_copper").get(copper)) is not None:
             ids["ufCrm24_1707849930"] = v                    # Outer layers (Copper)
 
     # Если материал был распознан (поле не пустое), но LLM не смог нормализовать
     # его к каноническому значению — ставим MIX/Others (ID 5646).
     if enriched.get("base_material"):
+        materials = get_dict("materials")
         material = normalized.get("base_material")
-        ids["ufCrm24_1707838248"] = MATERIALS.get(material) if material else MATERIALS["MIX/Others"]
+        fallback_id = materials.get("MIX/Others", MATERIALS["MIX/Others"])
+        ids["ufCrm24_1707838248"] = materials.get(material) if material else fallback_id
         if not material:
             logger.warning(
-                "Материал '%s' не найден в справочнике — назначен MIX/Others (5646)",
-                enriched.get("base_material"),
+                "Материал '%s' не найден в справочнике — назначен MIX/Others (%s)",
+                enriched.get("base_material"), fallback_id,
             )
 
     if pcb_type := normalized.get("pcb_type"):
-        if (v := PCB_TYPE.get(pcb_type)) is not None:
+        if (v := get_dict("pcb_type").get(pcb_type)) is not None:
             ids["ufCrm24_1707838074"] = v
 
     if ipc_cls := normalized.get("ipc_class"):
-        if (v := IPC_CLASS.get(ipc_cls)) is not None:
+        if (v := get_dict("ipc_class").get(ipc_cls)) is not None:
             ids["ufCrm24_1707841162"] = v                    # Class
 
     # ── Количество слоёв (числовой маппинг, не через LLM) ────────
@@ -484,13 +568,13 @@ def map_to_bitrix24_ids(enriched: dict[str, Any]) -> dict[str, int]:
     # ── Yes/No поля (прямой маппинг, не через LLM) ───────────────
 
     yes_no_fields: list[tuple[str, str, dict]] = [
-        ("edge_plating",        "ufCrm24_1707839110", EDGE_PLATING),
-        ("peelable_mask",       "ufCrm24_1707839629", PEELABLE_SM),
-        ("gold_fingers",        "ufCrm24_1707838528", GOLD_FINGERS),        # Gold Fingers   iblock_id=70
-        ("back_drill",          "ufCrm24_1707851410", BACK_DRILL),          # Back Drill     iblock_id=230
-        ("coin",                "ufCrm24_1707851442", COIN),                # Coin           iblock_id=232
-        ("embedded_components", "ufCrm24_1707851467", EMBEDDED_COMPONENTS), # Embedded Comp  iblock_id=234
-        ("cover_layer",         "ufCrm24_1707840205", COVER_LAYER),         # Cover layer    iblock_id=110
+        ("edge_plating",        "ufCrm24_1707839110", get_dict("edge_plating")),
+        ("peelable_mask",       "ufCrm24_1707839629", get_dict("peelable_sm")),
+        ("gold_fingers",        "ufCrm24_1707838528", get_dict("gold_fingers")),        # iblock 70
+        ("back_drill",          "ufCrm24_1707851410", get_dict("back_drill")),          # iblock 230
+        ("coin",                "ufCrm24_1707851442", get_dict("coin")),                # iblock 232
+        ("embedded_components", "ufCrm24_1707851467", get_dict("embedded_components")), # iblock 234
+        ("cover_layer",         "ufCrm24_1707840205", get_dict("cover_layer")),         # iblock 110
     ]
     for src_key, field_code, canon in yes_no_fields:
         raw_val = enriched.get(src_key)
@@ -502,8 +586,8 @@ def map_to_bitrix24_ids(enriched: dict[str, Any]) -> dict[str, int]:
 
     # ── Текстовые справочные поля (не Yes/No, прямой lookup) ─────
     lookup_fields: list[tuple[str, str, dict]] = [
-        ("flex_type",          "ufCrm24_1707840178", FLEX_TYPE),          # Flex Type          iblock_id=108
-        ("flex_layer_location","ufCrm24_1707851507", FLEX_LAYER_LOCATION), # Flex Layer Location iblock_id=236
+        ("flex_type",          "ufCrm24_1707840178", get_dict("flex_type")),           # iblock 108
+        ("flex_layer_location","ufCrm24_1707851507", get_dict("flex_layer_location")), # iblock 236
     ]
     for src_key, field_code, canon in lookup_fields:
         raw_val = enriched.get(src_key)
@@ -521,16 +605,13 @@ def map_to_bitrix24_ids(enriched: dict[str, Any]) -> dict[str, int]:
 
     # ── Единицы заказа (дефолт: ea) ──────────────────────────────
 
+    # Итоговое значение может быть переопределено на pnl в map_pcb_to_bitrix24_fields,
+    # когда из геометрии видно, что плата поставляется в панелях.
     order_unit_raw = (enriched.get("order_unit") or "ea").lower().strip()
-    ids["ufCrm24_1707838030"] = ORDER_UNIT.get(
-        "pnl" if "pnl" in order_unit_raw or "panel" in order_unit_raw else "ea",
-        5256,
-    )
-
-    ids["ufCrm24_1707849863"] = PRODUCTION_UNIT.get(
-        "pnl" if "pnl" in order_unit_raw else "ea",
-        6270,
-    )
+    order_key = "pnl" if ("pnl" in order_unit_raw or "panel" in order_unit_raw) else "ea"
+    ids["ufCrm24_1707838030"] = get_dict("order_unit").get(order_key, ORDER_UNIT[order_key])
+    prod_key = "pnl" if "pnl" in order_unit_raw else "ea"
+    ids["ufCrm24_1707849863"] = get_dict("production_unit").get(prod_key, PRODUCTION_UNIT[prod_key])
 
     logger.info("Смаплировано %d полей Битрикс24", len(ids))
     return ids
@@ -551,7 +632,11 @@ def _map_layers(layer_text: str) -> Optional[int]:
     n = int(numbers[0])
     # Битрикс24: 1-слойная → "01", 2 → "02", ... 10+ без нуля
     key = f"{n:02d}" if n < 10 else str(n)
-    result = LAYERS.get(key)
+    layers = get_dict("layers")
+    result = layers.get(key)
+    if result is None:
+        # Живой справочник может хранить значения без ведущего нуля.
+        result = layers.get(str(n))
     if result is None:
         logger.warning("Количество слоёв %s не найдено в справочнике", key)
     return result
