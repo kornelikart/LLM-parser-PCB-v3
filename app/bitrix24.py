@@ -11,13 +11,13 @@ from typing import Dict, Any, Optional
 try:
     from logger import setup_logger
     import bitrix24_dictionaries as dicts
-    from pcb_normalizer import normalize_and_get_ids
+    from pcb_normalizer import normalize_and_get_ids, map_to_bitrix24_ids, is_affirmative
     from utils import create_mistral_http_client
     from bitrix24_api import get_bitrix24_api
 except ImportError:
     from .logger import setup_logger
     from . import bitrix24_dictionaries as dicts
-    from .pcb_normalizer import normalize_and_get_ids
+    from .pcb_normalizer import normalize_and_get_ids, map_to_bitrix24_ids, is_affirmative
     from .utils import create_mistral_http_client
     from .bitrix24_api import get_bitrix24_api
 
@@ -182,16 +182,8 @@ def _parse_positive_int(value: Any) -> Optional[int]:
 
 
 def _is_yes(value: Any) -> bool:
-    """Признак утвердительного ответа в русских/английских бланках."""
-    v = str(value or "").strip().lower()
-    if not v:
-        return False
-    positives = ("yes", "да", "есть", "требуется", "true", "1", "+", "нужен", "нужно", "имеется")
-    negatives = ("no", "нет", "не требуется", "отсутствует", "false", "0", "-", "—", "n/a")
-    for neg in negatives:
-        if v == neg or v.startswith(neg + " "):
-            return False
-    return any(p in v for p in positives)
+    """Признак утвердительного ответа. Правило общее с маппингом справочников."""
+    return is_affirmative(value) is True
 
 
 def _is_panel_delivery(
@@ -228,12 +220,12 @@ def _is_panel_delivery(
 # в таблице результатов, но в CRM не отправляется (пишется в лог).
 # ═══════════════════════════════════════════════════════════════════
 
+# Контроль импеданса, серийный номер и сторона маркировки (Date code)
+# имеют известные коды и справочники — они маппятся в pcb_normalizer.
+# Здесь остаются характеристики, чьи коды в Битрикс24 пока не подтверждены.
 _OPTIONAL_FIELD_ENV = {
     "no_of_diff_boards": "B24_FIELD_NO_OF_DIFF_BOARDS",
-    "impedance_control": "B24_FIELD_IMPEDANCE_CONTROL",
     "min_hole_size":     "B24_FIELD_MIN_HOLE_SIZE",
-    "marking_side":      "B24_FIELD_MARKING_SIDE",
-    "serial_number":     "B24_FIELD_SERIAL_NUMBER",
 }
 
 # Ключевые слова для автопоиска поля по названию в Битрикс24.
@@ -250,20 +242,6 @@ _OPTIONAL_FIELD_KEYWORDS: Dict[str, Dict[str, list]] = {
                      "min drill", "minimum drill", "hole size", "hole diameter",
                      "мин. отверст", "минимальный диаметр", "диаметр отверст"],
         "exclude": ["per board", "density", "aspect", "count", "back drill", "плотност"],
-    },
-    "impedance_control": {
-        "keywords": ["imped", "импеданс", "волнов", "controlled imp"],
-        "exclude": [],
-    },
-    "marking_side": {
-        "keywords": ["marking side", "legend side", "silkscreen side", "side of marking",
-                     "сторона маркировки", "маркировка сторона"],
-        "exclude": ["colour", "color", "цвет"],
-    },
-    "serial_number": {
-        "keywords": ["serial number", "serial no", "серийный номер", "порядковый номер",
-                     "unique code", "barcode", "штрих-код", "штрихкод"],
-        "exclude": [],
     },
 }
 
@@ -383,6 +361,7 @@ def _apply_optional_fields(fields: Dict[str, Any], pcb_data: Dict[str, Any]) -> 
     """
     prepared: Dict[str, Any] = {}
 
+    # Min. Hole size — числовое поле: передаётся само значение в мм, не item_id.
     raw_hole = pcb_data.get("min_hole_size")
     if raw_hole:
         nums = re.findall(r"\d+(?:[.,]\d+)?", str(raw_hole).replace(",", "."))
@@ -390,26 +369,6 @@ def _apply_optional_fields(fields: Dict[str, Any], pcb_data: Dict[str, Any]) -> 
             hole = float(nums[0])
             if 0 < hole <= 20:
                 prepared["min_hole_size"] = hole
-
-    if str(pcb_data.get("impedance_control") or "").strip():
-        prepared["impedance_control"] = "Yes" if _is_yes(pcb_data["impedance_control"]) else "No"
-
-    if str(pcb_data.get("serial_number") or "").strip():
-        prepared["serial_number"] = "Yes" if _is_yes(pcb_data["serial_number"]) else "No"
-
-    side = str(pcb_data.get("marking_side") or "").strip()
-    if side:
-        low = side.lower()
-        has_top = "top" in low or "верх" in low or "сверху" in low
-        has_bot = "bot" in low or "низ" in low or "снизу" in low
-        if "две стороны" in low or "2 сторон" in low or "обе" in low or (has_top and has_bot):
-            prepared["marking_side"] = "TOP+BOTTOM"
-        elif has_top:
-            prepared["marking_side"] = "TOP"
-        elif has_bot:
-            prepared["marking_side"] = "BOTTOM"
-        elif low in ("нет", "none", "отсутствует", "no"):
-            prepared["marking_side"] = "None"
 
     for key, value in prepared.items():
         code = resolve_optional_field_code(key)
@@ -609,6 +568,17 @@ def map_pcb_to_bitrix24_fields(pcb_data: Dict[str, Any], mistral_client: Any = N
 
     # ── Старый вариант: dicts.* (fallback) ────────────────────────────────
     if not normalization_used:
+        # Поля, не зависящие от LLM-нормализации (Yes/No-справочники, слои,
+        # Date code), маппятся тем же кодом, что и в основном пути — иначе
+        # без LLM они бы вовсе не заполнялись.
+        # base_material исключаем: без нормализации он ушёл бы в MIX/Others
+        # с ложным предупреждением в логе, а ниже его подберёт dicts.*
+        without_material = {k: v for k, v in pcb_data.items() if k != "base_material"}
+        try:
+            fields.update(map_to_bitrix24_ids({**without_material, "_normalized": {}}))
+        except Exception as e:
+            logger.warning("Прямой маппинг справочных полей не удался: %s", e)
+
         # UF_CRM_24_1707838248: Materials (справочник 56)
         # Если материал не найден в справочнике — назначаем MIX/Others (ID 5646).
         if pcb_data.get("base_material"):

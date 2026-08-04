@@ -195,6 +195,31 @@ IPC_CLASS: dict[str, int] = {
     "IPC Class 3": 6214,
 }
 
+# ufCrm24_1707840096  Controlled Impedance
+CONTROLLED_IMPEDANCE: dict[str, int] = {
+    "No":  6088,
+    "Yes": 7204,
+}
+
+# ufCrm24_1707851328  Serial Number
+SERIAL_NUMBER: dict[str, int] = {
+    "No":  6516,
+    "Yes": 6518,
+}
+
+# ufCrm24_1707841090  Date code — сторона и способ нанесения маркировки
+# даты изготовления. Пустое значение (6192) означает «не требуется».
+DATE_CODE: dict[str, int] = {
+    "on Top":            6194,
+    "on Bottom":         6196,
+    "Soldermask-Top":    6198,
+    "Soldermask-Bottom": 6200,
+    "Copper-Top":        6202,
+    "Copper-Bottom":     6204,
+    "Silkscreen-Top":    6206,
+    "Silkscreen-Bottom": 6208,
+}
+
 # IBLOCK_ID = 54  No of Layers  (name → item_id)
 LAYERS: dict[str, int] = {
     "01": 6784, "02": 6786, "04": 6788, "06": 6790,
@@ -238,12 +263,18 @@ _DICT_SOURCES: dict[str, tuple[dict, Optional[int]]] = {
     # Поля без IBLOCK_ID в документации: значения тянутся по коду поля.
     "ipc_class":            (IPC_CLASS, None),
     "outer_copper":         (OUTER_COPPER_FROM_COPPER, None),
+    "controlled_impedance": (CONTROLLED_IMPEDANCE, None),
+    "serial_number":        (SERIAL_NUMBER, None),
+    "date_code":            (DATE_CODE, None),
 }
 
 # Для справочников без IBLOCK_ID значения берутся по коду поля.
 _FIELD_CODE_SOURCES: dict[str, str] = {
-    "ipc_class":    "ufCrm24_1707841162",
-    "outer_copper": "ufCrm24_1707849930",
+    "ipc_class":            "ufCrm24_1707841162",
+    "outer_copper":         "ufCrm24_1707849930",
+    "controlled_impedance": "ufCrm24_1707840096",
+    "serial_number":        "ufCrm24_1707851328",
+    "date_code":            "ufCrm24_1707841090",
 }
 
 
@@ -392,8 +423,12 @@ If the material name does not clearly match any entry in the list → use "MIX/O
 - "FR4 TG150", "FR-4 TG-150", "FR4, Tg≥150", "Tg 150"           → "FR4 TG-150"
 - "FR4 TG170", "FR-4 TG-170", "FR4 HiTg (Tg≥170°C)", "Tg≥170"  → "FR4 TG-170"
 - "FR4 TG180", "High Tg FR4", "FR-4 (High TG)",
-  "IT180A", "IT-180A", "ITEQ IT-180" (Tg=180 laminate)           → "FR4 TG-180"
-- If an explicit Tg number is given, prefer it over generic "High Tg".
+  "IT180A", "IT-180A", "IT180", "ITEQ IT-180" (Tg=180 laminate)  → "FR4 TG-180"
+- IMPORTANT: "high TG reliability FR4", "a high TG reliability FR4",
+  "FR-4 (high TG reliability)" — a HIGH-TG grade WITHOUT a number.
+  Always map these to "FR4 TG-180", never to TG-170.
+- Rule of thumb: an explicit Tg number wins ("Tg≥170" → TG-170).
+  Only when NO number is given does generic "High Tg" mean TG-180.
 - "Polyimide", "PI", "Kapton"                                     → "Polyimide"
 - "Rogers 4003C", "RO4003", "RO4003C"                            → "Rogers 4003"
 - "Rogers 4350B", "RO4350", "RO4350B"                            → "Rogers 4350"
@@ -575,6 +610,8 @@ def map_to_bitrix24_ids(enriched: dict[str, Any]) -> dict[str, int]:
         ("coin",                "ufCrm24_1707851442", get_dict("coin")),                # iblock 232
         ("embedded_components", "ufCrm24_1707851467", get_dict("embedded_components")), # iblock 234
         ("cover_layer",         "ufCrm24_1707840205", get_dict("cover_layer")),         # iblock 110
+        ("impedance_control",   "ufCrm24_1707840096", get_dict("controlled_impedance")),
+        ("serial_number",       "ufCrm24_1707851328", get_dict("serial_number")),
     ]
     for src_key, field_code, canon in yes_no_fields:
         raw_val = enriched.get(src_key)
@@ -602,6 +639,14 @@ def map_to_bitrix24_ids(enriched: dict[str, Any]) -> dict[str, int]:
                     break
         if mapped_v is not None:
             ids[field_code] = mapped_v
+
+    # ── Date code: сторона и способ нанесения маркировки ─────────
+    # Значение собирается из стороны маркировки и способа нанесения
+    # (шелкография / маска / медь). Пустое значение справочника (6192)
+    # не отправляем — это «не требуется».
+    if date_code_value := _map_date_code(enriched):
+        if (v := get_dict("date_code").get(date_code_value)) is not None:
+            ids["ufCrm24_1707841090"] = v
 
     # ── Единицы заказа (дефолт: ea) ──────────────────────────────
 
@@ -642,17 +687,120 @@ def _map_layers(layer_text: str) -> Optional[int]:
     return result
 
 
+def _map_date_code(enriched: dict[str, Any]) -> Optional[str]:
+    """Собирает значение справочника Date code из распознанных характеристик.
+
+    Справочник различает не только сторону, но и способ нанесения:
+    'Silkscreen-Top' (шелкография), 'Soldermask-Top' (по маске),
+    'Copper-Top' (медью) и общее 'on Top' / 'on Bottom'.
+
+    Сторона берётся из marking_side, способ — из текста о маркировке.
+    Возвращает каноническое имя значения или None, если маркировка не требуется.
+    """
+    side_raw = str(enriched.get("marking_side") or "").strip()
+    if not side_raw:
+        return None
+
+    low = side_raw.lower()
+    if low in ("none", "нет", "отсутствует", "no", "-", "—"):
+        return None
+
+    has_top = any(m in low for m in ("top", "верх", "сверху"))
+    has_bot = any(m in low for m in ("bot", "низ", "снизу"))
+    if has_top:
+        side = "Top"
+    elif has_bot:
+        side = "Bottom"
+    else:
+        return None
+
+    # Способ нанесения ищем в полях, где он обычно упоминается.
+    context = " ".join(
+        str(enriched.get(k) or "")
+        for k in ("marking_side", "solder_mark_colour", "serial_number", "date_code")
+    ).lower()
+    if any(m in context for m in ("шелкограф", "silkscreen", "silk screen", "маркировочной краск")):
+        return f"Silkscreen-{side}"
+    if any(m in context for m in ("маск", "soldermask", "solder mask")):
+        return f"Soldermask-{side}"
+    if any(m in context for m in ("медь", "медью", "copper")):
+        return f"Copper-{side}"
+    return f"on {side}"
+
+
+# Формы «да»/«нет» в русских и английских бланках.
+# Точные — сравниваются целиком; словесные ищутся по границам слов, чтобы
+# распознать и развёрнутые ответы LLM вида «Yes, формат ХХХ (код изготовителя)».
+# Границы слов обязательны: иначе «да» нашлось бы внутри «дата».
+_EXACT_YES = frozenset({"yes", "да", "y", "1", "true", "+", "есть"})
+_EXACT_NO = frozenset({"no", "нет", "n", "0", "false", "-", "—", "none", "n/a", "отсутствует"})
+
+_WORD_NO = re.compile(
+    r"(?<![а-яёa-z])("
+    r"no|нет|not\s+required|"
+    r"не\s+(?:требуется|нужен|нужно|требуются|предусмотр\w*)|"
+    r"отсутству\w*|без\s+\w+"
+    r")(?![а-яёa-z])",
+    re.IGNORECASE,
+)
+_WORD_YES = re.compile(
+    r"(?<![а-яёa-z])("
+    r"yes|да|required|"
+    r"требуется|требуются|нужен|нужно|имеется|есть|"
+    r"предусмотрен\w*|обязательн\w*"
+    r")(?![а-яёa-z])",
+    re.IGNORECASE,
+)
+
+
+def is_affirmative(value: Any) -> Optional[bool]:
+    """True / False / None (не удалось определить) для да-нет значения.
+
+    Единая точка: тем же правилом пользуются и маппинг справочников,
+    и логика дополнительных полей в bitrix24.py.
+    """
+    v = str(value or "").strip().lower()
+    if not v:
+        return None
+    if v in _EXACT_NO:
+        return False
+    if v in _EXACT_YES:
+        return True
+
+    no_spans = [m.span() for m in _WORD_NO.finditer(v)]
+    # Утвердительные слова внутри отрицания не считаются: в «не требуется»
+    # слово «требуется» — часть отрицания, а не самостоятельное «да».
+    yes_outside = [
+        m.span() for m in _WORD_YES.finditer(v)
+        if not any(start <= m.start() and m.end() <= end for start, end in no_spans)
+    ]
+
+    if no_spans and yes_outside:
+        # «Да/Нет», «yes/no» — невыбранный вариант из бланка, а не ответ.
+        # Отправлять «Нет» в CRM нельзя: значение на самом деле неизвестно.
+        logger.debug("Значение '%s' содержит и «да», и «нет» — считаем неопределённым", value)
+        return None
+    if no_spans:
+        return False
+    if yes_outside:
+        return True
+    return None
+
+
 def _map_yes_no(raw: str, canon: dict[str, int]) -> Optional[int]:
-    """Маппинг булевых/Yes-No полей."""
+    """Маппинг булевых/Yes-No полей на item_id справочника."""
     normalized = raw.strip().lower()
-    if normalized in ("yes", "да", "1", "true", "y"):
-        return canon.get("Yes")
-    if normalized in ("no", "нет", "0", "false", "n", "none", "n/a", "—"):
-        return canon.get("No")
-    # Пробуем напрямую
+    if not normalized:
+        return None
+    # Точное совпадение с названием значения справочника имеет приоритет.
     for key, val in canon.items():
         if key.lower() == normalized:
             return val
+    verdict = is_affirmative(normalized)
+    if verdict is True:
+        return canon.get("Yes")
+    if verdict is False:
+        return canon.get("No")
     return None
 
 
