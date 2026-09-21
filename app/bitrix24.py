@@ -12,13 +12,13 @@ try:
     from logger import setup_logger
     import bitrix24_dictionaries as dicts
     from pcb_normalizer import normalize_and_get_ids, map_to_bitrix24_ids, is_affirmative
-    from utils import create_mistral_http_client
+    from utils import create_mistral_http_client, invoke_with_rate_limit_retry, usage_log_config
     from bitrix24_api import get_bitrix24_api
 except ImportError:
     from .logger import setup_logger
     from . import bitrix24_dictionaries as dicts
     from .pcb_normalizer import normalize_and_get_ids, map_to_bitrix24_ids, is_affirmative
-    from .utils import create_mistral_http_client
+    from .utils import create_mistral_http_client, invoke_with_rate_limit_retry, usage_log_config
     from .bitrix24_api import get_bitrix24_api
 
 logger = setup_logger(level=logging.INFO)
@@ -81,12 +81,19 @@ class _MistralChatAdapter:
             client=http_client,
             model_kwargs=model_kwargs,
             # Нормализация — не критичный шаг: при сетевой ошибке есть fallback на
-            # статические справочники. Ограничиваем ретраи LangChain, чтобы
-            # пользователь не ждал минуты вместо быстрого перехода к fallback.
-            max_retries=1,
+            # статические справочники. Ограничиваем ретраи LangChain (2 попытки,
+            # пауза ~4 с), чтобы пользователь не ждал минуты вместо быстрого
+            # перехода к fallback; одна попытка — мало: секундный отказ локального
+            # proxy (WinError 10061) молча обнулял нормализацию на eval-прогоне.
+            max_retries=2,
         )
         try:
-            ai_msg = llm.invoke(lc_messages)
+            # При 429 ждём недолго (Промпт 1 мог только что выбрать квоту): без этого
+            # нормализация молча уходит в fallback и материал становится MIX/Others.
+            ai_msg = invoke_with_rate_limit_retry(
+                lambda: llm.invoke(lc_messages, config=usage_log_config("PCB normalization (prompt 2)")),
+                attempts=3, max_wait=20.0, what="PCB normalization (prompt 2)",
+            )
         finally:
             http_client.close()
         content = getattr(ai_msg, "content", None) or str(ai_msg)
@@ -487,7 +494,11 @@ def create_bitrix24_item(
     raise Exception(f"Не удалось подключиться к Битрикс24: {last_network_error}")
 
 
-def map_pcb_to_bitrix24_fields(pcb_data: Dict[str, Any], mistral_client: Any = None) -> Dict[str, Any]:
+def map_pcb_to_bitrix24_fields(
+    pcb_data: Dict[str, Any],
+    mistral_client: Any = None,
+    diagnostics: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
     """
     Преобразует данные PCB в формат полей Битрикс24.
     
@@ -502,6 +513,10 @@ def map_pcb_to_bitrix24_fields(pcb_data: Dict[str, Any], mistral_client: Any = N
     
     Args:
         pcb_data: Словарь с данными PCB (из PCBCharacteristics.model_dump())
+        mistral_client: клиент для LLM-нормализации (Промпт 2); None — только dicts.*
+        diagnostics: если передан словарь, в него пишется "normalization_error" —
+            причина, по которой Промпт 2 не выполнился и сработал fallback на dicts.*
+            (интерфейс показывает это пользователю).
     
     Returns:
         Словарь с полями для Битрикс24 (UF_CRM_24_*)
@@ -558,13 +573,20 @@ def map_pcb_to_bitrix24_fields(pcb_data: Dict[str, Any], mistral_client: Any = N
             if not hasattr(mistral_client, "chat"):
                 normalizer_client = _MistralChatAdapter(mistral_client)
 
-            _, b24_ids = normalize_and_get_ids(pcb_data, normalizer_client)
+            enriched, b24_ids = normalize_and_get_ids(pcb_data, normalizer_client)
+            if enriched.get("_normalization_error"):
+                # LLM не ответил (например, 429): по пустому "_normalized" материал
+                # ушёл бы в MIX/Others, а Finish/Copper/Class остались бы пустыми —
+                # статические справочники дают результат лучше.
+                raise RuntimeError(enriched["_normalization_error"])
 
             fields.update(b24_ids)
             normalization_used = True
         except Exception as e:
             logger.warning("Нормализация PCB не удалась, fallback на dicts.*: %s", e)
             normalization_used = False
+            if diagnostics is not None:
+                diagnostics["normalization_error"] = str(e)
 
     # ── Старый вариант: dicts.* (fallback) ────────────────────────────────
     if not normalization_used:

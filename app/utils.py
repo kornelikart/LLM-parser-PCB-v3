@@ -1,10 +1,13 @@
 from langchain_mistralai import ChatMistralAI
+from langchain_core.callbacks import BaseCallbackHandler
 import httpx
 import pandas as pd
 import logging
 import time
 import struct
 import re
+from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 from typing import Optional, Union
 import os
 try:    # for running interface.py
@@ -643,6 +646,53 @@ def create_mistral_http_client(api_key: str, read_timeout: float = 120.0) -> htt
     )
 
 
+# ═══════════════════════════════════════════════════════════════════
+# ВЫБОР МОДЕЛИ И РАСХОД ТОКЕНОВ
+#
+# Лимиты Mistral считаются по каждой модели и зависят от тарифа. На плане Free
+# (проверено 21.09.2026) mistral-medium/small отвечают 429 с лимитом
+# x-ratelimit-limit-req-minute: 0, mistral-large — 403 tier_not_allowed; работают
+# ministral-14b-2512 (937 500 токенов/мин, 30 запросов/мин) и ministral-8b-2512
+# (625 000 / 188). На eval-наборе 14b (Промпт 1) + 8b (Промпт 2) дают 219/221
+# жёстких проверок — на уровне mistral-medium (205/207). Дефолты ниже — для
+# платного тарифа; на Free задайте модели в .env. Один запрос Промпта 1 —
+# 4–6 тыс. токенов (системный промпт + схема ≈ 3 500 + документ).
+# Имена моделей читаются из окружения при каждом вызове (config.py загружает
+# .env после импорта utils).
+# ═══════════════════════════════════════════════════════════════════
+
+DEFAULT_PARSE_MODEL = "mistral-medium-latest"
+
+
+def get_parse_model() -> str:
+    """Модель Промпта 1 (распознавание): MISTRAL_MODEL_PARSE или DEFAULT_PARSE_MODEL."""
+    return (os.getenv("MISTRAL_MODEL_PARSE") or "").strip() or DEFAULT_PARSE_MODEL
+
+
+class TokenUsageLogger(BaseCallbackHandler):
+    """Пишет в лог расход токенов из поля usage ответа Mistral — чтобы сверять с лимитом TPM."""
+
+    def __init__(self, what: str):
+        self.what = what
+        self.last: Optional[dict] = None
+
+    def on_llm_end(self, response, **kwargs) -> None:
+        out = getattr(response, "llm_output", None) or {}
+        usage = out.get("token_usage") or {}
+        if not usage:
+            return
+        self.last = dict(usage)
+        logger.info("%s: model=%s, tokens prompt=%s completion=%s total=%s",
+                    self.what, out.get("model_name") or out.get("model"),
+                    usage.get("prompt_tokens"), usage.get("completion_tokens"),
+                    usage.get("total_tokens"))
+
+
+def usage_log_config(what: str) -> dict:
+    """config для .invoke(): лог расхода токенов под подписью what."""
+    return {"callbacks": [TokenUsageLogger(what)]}
+
+
 def create_pcb_model(params: dict[str, str]) -> ChatMistralAI:
     """Creates and configures a ChatMistralAI model instance for PCB characteristics parsing.
 
@@ -650,14 +700,16 @@ def create_pcb_model(params: dict[str, str]) -> ChatMistralAI:
         params (dict[str, str]): A dictionary containing parameters for model configuration.
             Expected keys:
                 - 'api_key': The API key for authenticating with the ChatMistralAI service.
+                - 'model' (optional): имя модели; иначе MISTRAL_MODEL_PARSE / DEFAULT_PARSE_MODEL.
 
     Returns:
         ChatMistralAI: An instance of the ChatMistralAI model configured for PCB characteristics parsing.
     """
     api_key = (params.get("api_key") or "").strip()
+    model = (params.get("model") or "").strip() or get_parse_model()
     # Логируем префикс ключа (безопасно) чтобы понять, какой ключ реально используется в сервере.
     key_prefix = (api_key[:6] + "...") if api_key else None
-    logger.info("MISTRAL_API_KEY prefix: %s (len=%s)", key_prefix, len(api_key))
+    logger.info("MISTRAL_API_KEY prefix: %s (len=%s), модель Промпта 1: %s", key_prefix, len(api_key), model)
     if api_key == "mistral_api_key":
         logger.warning("Используется плейсхолдер MISTRAL_API_KEY. Проверьте загрузку .env.")
     if not api_key:
@@ -668,12 +720,228 @@ def create_pcb_model(params: dict[str, str]) -> ChatMistralAI:
 
     http_client = create_mistral_http_client(api_key)
     llm = ChatMistralAI(
-        model="mistral-medium-latest",
+        model=model,
         temperature=0.1,
         api_key=api_key,
         client=http_client,
     )
     return llm.with_structured_output(PCBCharacteristics)
+
+
+# ═══════════════════════════════════════════════════════════════════
+# ОШИБКИ MISTRAL API: КЛАССИФИКАЦИЯ И ПОВТОРЫ
+#
+# Тип ошибки определяется по HTTP-статусу ответа (httpx.HTTPStatusError, который
+# бросает LangChain), а не по подстроке в тексте: текст ошибки валидации содержит
+# значения из документа, и «ГОСТ Р 53429-2009» превращал её в «лимит запросов».
+#
+# Лимиты Mistral (запросы/сек, токены/мин, токены/мес) действуют на организацию
+# и по каждой модели; в Free mode они минимальны, а квота поминутная, поэтому
+# паузы в 2–4 секунды её не переживают. Для 429 — отдельная, более долгая
+# стратегия с учётом заголовка Retry-After; для сетевых сбоев — прежняя короткая.
+#
+# Переменные окружения:
+#     MISTRAL_RATE_LIMIT_ATTEMPTS  попыток при 429 (по умолчанию 5)
+#     MISTRAL_RATE_LIMIT_DELAY     первая пауза при 429, сек; далее ×2 (по умолчанию 5)
+# ═══════════════════════════════════════════════════════════════════
+
+class MistralRateLimitError(Exception):
+    """Mistral API отвечает 429 (лимит запросов тарифа): все попытки исчерпаны."""
+
+
+class MistralNetworkError(Exception):
+    """Сетевой сбой при обращении к Mistral API: все попытки исчерпаны."""
+
+
+_RATE_LIMIT_MAX_WAIT = 60.0  # потолок одной паузы между попытками при 429, сек
+
+_NETWORK_ERROR_MARKERS = (
+    # WinError 10054 = connection reset, 10060 = timeout, 10061 = connection refused
+    "10054", "10060", "10061", "ReadError", "ConnectError",
+    "TimeoutException", "RemoteProtocolError", "ConnectionReset",
+    "Connection reset", "forcibly closed",
+)
+
+
+def _env_number(name: str, default, cast):
+    """Число из переменной окружения; пустое или невалидное значение → default."""
+    raw = (os.getenv(name) or "").strip()
+    if not raw:
+        return default
+    try:
+        return cast(raw)
+    except ValueError:
+        logger.warning("%s=%r не число, используется %s", name, raw, default)
+        return default
+
+
+def http_status_of(e: BaseException) -> Optional[int]:
+    """HTTP-статус ответа API из исключения (или его причины), если сервер ответил."""
+    cur: Optional[BaseException] = e
+    seen = set()
+    while cur is not None and id(cur) not in seen:
+        seen.add(id(cur))
+        status = getattr(cur, "status_code", None)
+        if not isinstance(status, int):
+            status = getattr(getattr(cur, "response", None), "status_code", None)
+        if isinstance(status, int):
+            return status
+        cur = cur.__cause__
+    return None
+
+
+def is_rate_limit_error(e: BaseException) -> bool:
+    """429 от API. Без HTTP-статуса — только по формулировкам ответа, не по цифрам."""
+    status = http_status_of(e)
+    if status is not None:
+        return status == 429
+    msg = str(e).lower()
+    return any(m in msg for m in ("rate limit", "rate_limited", "too many requests", "capacity exceeded"))
+
+
+_TIER_HINT = (
+    "Задайте доступную модель через MISTRAL_MODEL_PARSE / MISTRAL_MODEL_NORMALIZE в .env "
+    "(на плане Free работают ministral-14b-2512 / ministral-8b-2512) или включите "
+    "pay-as-you-go в консоли Mistral (страница Subscription)."
+)
+
+
+def is_tier_error(e: BaseException) -> bool:
+    """403 tier_not_allowed: модель не входит в тариф (например, mistral-large на Free)."""
+    if http_status_of(e) != 403:
+        return False
+    msg = str(e).lower()
+    return "tier_not_allowed" in msg or "subscription tier" in msg
+
+
+def rate_limit_is_zero(e: BaseException) -> bool:
+    """429, в заголовках которого лимит модели равен нулю (x-ratelimit-limit-req-minute: 0).
+
+    Так Free-план отвечает для моделей, не входящих в тариф (mistral-medium/small):
+    повторять запрос бессмысленно — квота не восстановится.
+    """
+    return any(
+        k.lower().startswith("x-ratelimit-limit") and str(v).strip() == "0"
+        for k, v in rate_limit_headers(e).items()
+    )
+
+
+def is_network_error(e: BaseException) -> bool:
+    """Сетевой сбой (ответа сервера нет): обрыв, отказ, таймаут, сброс соединения."""
+    if http_status_of(e) is not None:
+        return False  # сервер ответил — это не сетевая проблема
+    if isinstance(e, (httpx.RequestError, ConnectionError, TimeoutError)):
+        return True
+    msg = str(e)
+    return any(marker in msg for marker in _NETWORK_ERROR_MARKERS)
+
+
+def rate_limit_headers(e: BaseException) -> dict[str, str]:
+    """Заголовки ответа о лимитах (x-ratelimit*, retry-after): какой лимит исчерпан.
+
+    Mistral отдаёт отдельные счётчики на минуту и на месяц — по ним видно,
+    упёрлись ли мы в скорость (токены/мин) или в месячную квоту.
+    """
+    headers = getattr(getattr(e, "response", None), "headers", None)
+    if not headers:
+        return {}
+    return {
+        k: v for k, v in headers.items()
+        if "ratelimit" in k.lower() or k.lower() == "retry-after"
+    }
+
+
+def retry_after_seconds(e: BaseException) -> Optional[float]:
+    """Пауза из заголовка Retry-After (секунды или HTTP-дата), если сервер её прислал."""
+    headers = getattr(getattr(e, "response", None), "headers", None)
+    if not headers:
+        return None
+    raw = str(headers.get("retry-after") or headers.get("Retry-After") or "").strip()
+    if not raw:
+        return None
+    try:
+        return max(0.0, float(raw))
+    except ValueError:
+        pass
+    try:
+        until = parsedate_to_datetime(raw)
+    except (TypeError, ValueError):
+        return None
+    if until.tzinfo is None:
+        until = until.replace(tzinfo=timezone.utc)
+    return max(0.0, (until - datetime.now(timezone.utc)).total_seconds())
+
+
+def invoke_with_rate_limit_retry(
+    fn,
+    *,
+    attempts: Optional[int] = None,
+    delay: Optional[float] = None,
+    max_wait: float = _RATE_LIMIT_MAX_WAIT,
+    what: str = "Mistral request",
+):
+    """Вызывает fn(), повторяя ТОЛЬКО при HTTP 429; остальные ошибки пробрасывает сразу.
+
+    Паузы: delay × 2^n, но не больше max_wait и не меньше Retry-After сервера.
+    Если сервер просит ждать дольше max_wait — сдаёмся сразу (ждать бессмысленно).
+
+    Args:
+        fn: вызов без аргументов (например, lambda: llm.invoke(messages)).
+        attempts: число попыток; по умолчанию MISTRAL_RATE_LIMIT_ATTEMPTS или 5.
+        delay: первая пауза, сек; по умолчанию MISTRAL_RATE_LIMIT_DELAY или 5.
+        max_wait: потолок одной паузы, сек.
+        what: подпись для логов.
+
+    Raises:
+        MistralRateLimitError: 429 на всех попытках или Retry-After больше потолка.
+    """
+    if attempts is None:
+        attempts = _env_number("MISTRAL_RATE_LIMIT_ATTEMPTS", 5, int)
+    if delay is None:
+        delay = _env_number("MISTRAL_RATE_LIMIT_DELAY", 5.0, float)
+    attempts = max(1, attempts)
+    started = time.monotonic()
+
+    for n in range(1, attempts + 1):
+        try:
+            logger.info("%s: attempt %d", what, n)
+            return fn()
+        except Exception as e:
+            if not is_rate_limit_error(e):
+                raise
+            elapsed = time.monotonic() - started
+            logger.warning("%s: HTTP 429 on attempt %d/%d: %s | limits: %s",
+                           what, n, attempts, e, rate_limit_headers(e) or "—")
+            if rate_limit_is_zero(e):
+                logger.error("%s: лимит модели на текущем тарифе равен нулю — повторы бесполезны.", what)
+                raise MistralRateLimitError(
+                    f"Модель для шага «{what}» недоступна на текущем тарифе Mistral: лимит запросов "
+                    f"в минуту равен 0 ({rate_limit_headers(e)}). {_TIER_HINT}"
+                ) from e
+            if n >= attempts:
+                logger.error("%s: rate limit, all %d attempts failed (%.0f sec).", what, attempts, elapsed)
+                raise MistralRateLimitError(
+                    "Превышен лимит запросов Mistral API (HTTP 429): сервис не принял запрос "
+                    f"за {attempts} попыток ({elapsed:.0f} сек). Подождите минуту и повторите; "
+                    "лимиты тарифа — в консоли Mistral (Admin → API → Limits)."
+                ) from e
+            wait = min(delay * (2 ** (n - 1)), max_wait)
+            server_wait = retry_after_seconds(e)
+            if server_wait is not None:
+                if server_wait > max_wait:
+                    logger.error("%s: server asks to wait %.0f sec (Retry-After), giving up.",
+                                 what, server_wait)
+                    raise MistralRateLimitError(
+                        "Превышен лимит запросов Mistral API (HTTP 429): сервер просит подождать "
+                        f"{server_wait:.0f} сек. Повторите позже; лимиты тарифа — в консоли "
+                        "Mistral (Admin → API → Limits)."
+                    ) from e
+                wait = max(wait, server_wait)
+            logger.info("%s: rate limit (HTTP 429), retry %d/%d in %.1f sec%s...",
+                        what, n + 1, attempts, wait,
+                        f" (Retry-After: {server_wait:.0f})" if server_wait is not None else "")
+            time.sleep(wait)
+    raise AssertionError("unreachable")
 
 
 def process_excel_pcb_with_retry(
@@ -682,21 +950,36 @@ def process_excel_pcb_with_retry(
     max_retries: int = 3,
     delay: float = 2.0,
     model_params: Optional[dict] = None,
+    rate_limit_attempts: Optional[int] = None,
+    rate_limit_delay: Optional[float] = None,
 ) -> Optional[dict]:
     """Processes Excel data for PCB characteristics using a ChatMistralAI model with retry logic.
 
     Args:
         excel_txt (str): A string containing the Excel data to be processed.
         llm_parser (ChatMistralAI): An instance of the ChatMistralAI model used for parsing PCB data.
-        max_retries (int): Maximum number of retry attempts.
-        delay (float): Delay between retries in seconds.
+        max_retries (int): число попыток при СЕТЕВЫХ сбоях.
+        delay (float): пауза между ними, сек (далее ×2).
         model_params (dict | None): параметры модели ('api_key'). Если переданы, после
             сетевой ошибки клиент пересоздаётся с заново выбранным сетевым режимом —
             это позволяет подхватить включение/выключение VPN без перезапуска сервера.
+        rate_limit_attempts (int | None): число попыток при HTTP 429;
+            по умолчанию MISTRAL_RATE_LIMIT_ATTEMPTS или 5.
+        rate_limit_delay (float | None): первая пауза при 429, сек; далее ×2 до
+            _RATE_LIMIT_MAX_WAIT, но не меньше Retry-After сервера;
+            по умолчанию MISTRAL_RATE_LIMIT_DELAY или 5.
 
     Returns:
-        dict: A dictionary containing the processed PCB characteristics, or None if all retries failed.
+        dict: A dictionary containing the processed PCB characteristics.
+
+    Raises:
+        MistralRateLimitError: 429 на всех попытках (или сервер просит ждать дольше потолка).
+        MistralNetworkError: сетевой сбой на всех попытках.
+        Остальные ошибки (401, невалидный ответ модели) пробрасываются как есть —
+        повтор их не исправит.
     """
+    max_retries = max(1, max_retries)
+
     messages = [
         (
             "system",
@@ -743,56 +1026,48 @@ def process_excel_pcb_with_retry(
         ("human", excel_txt),
     ]
     
-    for attempt in range(max_retries):
+    network_failures = 0
+    while True:
         try:
-            logger.info("Attempting to process PCB data (attempt %d/%d)", attempt + 1, max_retries)
-            answer = llm_parser.invoke(messages)
+            answer = invoke_with_rate_limit_retry(
+                lambda: llm_parser.invoke(messages, config=usage_log_config("PCB parsing (prompt 1)")),
+                attempts=rate_limit_attempts,
+                delay=rate_limit_delay,
+                what="PCB parsing (prompt 1)",
+            )
             logger.info("Successfully processed PCB data")
             return answer.model_dump()
 
+        except MistralRateLimitError:
+            raise  # попытки при 429 уже исчерпаны внутри хелпера
+
         except Exception as e:
             error_msg = str(e)
-            logger.warning("Attempt %d/%d failed: %s", attempt + 1, max_retries, error_msg)
+            logger.warning("Attempt failed: %s", error_msg)
 
-            # Определяем тип ошибки
-            is_rate_limit = "429" in error_msg or "capacity exceeded" in error_msg.lower()
-            # WinError 10054 = connection reset, 10061 = connection refused — временные сетевые сбои
-            is_network_error = any(x in error_msg for x in (
-                "10054", "10061", "ReadError", "ConnectError",
-                "TimeoutException", "RemoteProtocolError", "ConnectionReset",
-                "Connection reset", "forcibly closed",
-            ))
-
-            if is_rate_limit or is_network_error:
-                if attempt < max_retries - 1:
-                    wait_time = delay * (2 ** attempt)  # Exponential backoff
-                    reason = "Rate limit" if is_rate_limit else "Network error"
-                    logger.info("%s. Retry in %.1f sec...", reason, wait_time)
-                    # Сетевая ошибка может означать, что VPN включили/выключили:
-                    # сбрасываем выбранный режим и пересобираем клиент.
-                    if is_network_error:
-                        reset_mistral_network_mode()
-                        if model_params:
-                            try:
-                                llm_parser = create_pcb_model(model_params)
-                                logger.info("Клиент Mistral пересоздан с новым сетевым режимом.")
-                            except Exception as rebuild_err:
-                                logger.warning("Не удалось пересоздать клиент: %s", rebuild_err)
-                    time.sleep(wait_time)
-                    continue
-                else:
-                    logger.error("All %d attempts failed.", max_retries)
-                    if is_rate_limit:
-                        raise Exception("Сервис временно недоступен (превышен лимит запросов). Попробуйте позже.")
-                    raise Exception(
+            if is_network_error(e):
+                network_failures += 1
+                if network_failures >= max_retries:
+                    logger.error("Network error: all %d attempts failed.", max_retries)
+                    raise MistralNetworkError(
                         f"Ошибка сети при обращении к Mistral API: {error_msg}\n"
                         "Проверьте интернет-соединение и настройки proxy/антивируса."
-                    )
-            else:
-                # Нереентерабельная ошибка (неверный ключ, невалидный запрос и т.д.)
-                logger.error("Non-retryable error: %s", error_msg)
-                raise e
+                    ) from e
+                wait = delay * (2 ** (network_failures - 1))  # Exponential backoff
+                logger.info("Network error. Retry %d/%d in %.1f sec...",
+                            network_failures + 1, max_retries, wait)
+                # Сетевая ошибка может означать, что VPN включили/выключили:
+                # сбрасываем выбранный режим и пересобираем клиент.
+                reset_mistral_network_mode()
+                if model_params:
+                    try:
+                        llm_parser = create_pcb_model(model_params)
+                        logger.info("Клиент Mistral пересоздан с новым сетевым режимом.")
+                    except Exception as rebuild_err:
+                        logger.warning("Не удалось пересоздать клиент: %s", rebuild_err)
+                time.sleep(wait)
+                continue
 
-    raise RuntimeError("Не удалось обработать данные PCB после всех попыток.")
-
-
+            # Неповторяемая ошибка (неверный ключ, невалидный ответ модели и т.д.)
+            logger.error("Non-retryable error: %s", error_msg)
+            raise

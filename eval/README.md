@@ -23,6 +23,10 @@ python eval/run_extraction_eval.py -v
 # 2. Полный пайплайн (Промпт 1 + Промпт 2 + маппинг), ~2 LLM-вызова на файл
 python eval/run_llm_eval.py
 python eval/run_llm_eval.py --only NICEVT      # только один файл
+
+# 3. Сравнить модели без повторных запросов: скоринг сохранённых ответов
+MISTRAL_MODEL_PARSE=ministral-14b-2512 python eval/run_llm_eval.py
+python eval/score_results.py eval/results/llm_<прогон A> eval/results/llm_<прогон B> -v
 ```
 
 `run_extraction_eval.py` возвращает код 0, если все проверки пройдены —

@@ -32,15 +32,27 @@ def _file_basename(file):
 
 
 def _friendly_error_message(e) -> str:
-    """Переводит технические ошибки Mistral/сети в сообщение для пользователя."""
+    """Переводит технические ошибки Mistral/сети в сообщение для пользователя.
+
+    Тип ошибки определяется по классу исключения и HTTP-статусу, а не по подстроке:
+    в тексте ошибки бывают данные документа («ГОСТ Р 53429-2009» — это не HTTP 429).
+    """
+    if isinstance(e, (utils.MistralRateLimitError, utils.MistralNetworkError)):
+        return str(e)  # текст уже сформулирован для пользователя — без второй обёртки
     msg = str(e)
-    if "401" in msg or "unauthorized" in msg.lower():
+    status = utils.http_status_of(e)
+    if status == 401 or (status is None and "unauthorized" in msg.lower()):
         return (
             "Mistral API вернул 401 Unauthorized. Проверьте, что переменная окружения "
             "`MISTRAL_API_KEY` задана и ключ действителен."
         )
-    if "capacity exceeded" in msg.lower() or "429" in msg:
-        return "Сервис временно недоступен из-за высокого спроса. Попробуйте позже или обновите API ключ."
+    if utils.is_tier_error(e):
+        return (
+            "Модель недоступна на вашем тарифе Mistral (403 tier_not_allowed). "
+            f"{utils._TIER_HINT}"
+        )
+    if utils.is_rate_limit_error(e):
+        return "Превышен лимит запросов Mistral API (HTTP 429). Попробуйте позже."
     return f"Ошибка при обработке файла: {msg}"
 
 
@@ -79,13 +91,28 @@ def _table_to_pcb_dict(table_df: pd.DataFrame) -> dict:
 
 
 def _map_fields_safely(pcb_data: dict, mistral_client):
-    """Маппинг в поля Битрикс24. Возвращает (fields, error); ошибка не прерывает показ результатов."""
+    """Маппинг в поля Битрикс24. Возвращает (fields, error, note).
+
+    error — маппинг не удался (результаты всё равно показываются);
+    note — маппинг удался, но без LLM-нормализации (Промпт 2 не выполнился,
+    сработал fallback на статические справочники) — пользователь должен это видеть.
+    """
+    diagnostics: dict = {}
     try:
-        fields = bitrix24.map_pcb_to_bitrix24_fields(pcb_data, mistral_client=mistral_client)
-        return fields, None
+        fields = bitrix24.map_pcb_to_bitrix24_fields(
+            pcb_data, mistral_client=mistral_client, diagnostics=diagnostics
+        )
     except Exception as e:
         logger.error("Не удалось сформировать поля Битрикс24: %s", e)
-        return None, str(e)
+        return None, str(e), None
+    note = None
+    if diagnostics.get("normalization_error"):
+        note = (
+            "⚠️ LLM-нормализация (Промпт 2) не выполнена, использованы статические справочники — "
+            "проверьте Materials / Finish Type / Copper. Причина: "
+            f"{diagnostics['normalization_error']}"
+        )
+    return fields, None, note
 
 
 def _write_result_files(base: str, parsed_dict: dict, b24_fields):
@@ -169,19 +196,21 @@ def parse_excel_pcb(file):
         raise gr.Error(_friendly_error_message(e))
 
     # Шаг 2: маппинг в поля Битрикс24 (LLM промпт 2 + справочники).
-    b24_fields, map_error = _map_fields_safely(parsed_dict, llm)
+    b24_fields, map_error, map_note = _map_fields_safely(parsed_dict, llm)
 
     # Шаг 3: файлы выгрузки (характеристики — всегда, заявка Битрикс24 — если поля готовы).
     df, csv_path, xlsx_path, json_path, b24_json_path = _write_result_files(
         _file_basename(file), parsed_dict, b24_fields
     )
 
-    mapped_upd, b24_json_upd, state_val, status_upd, send_upd = _mapping_updates(
-        b24_fields,
-        map_error,
-        b24_json_path,
+    success_msg = (
         "✅ Поля Битрикс24 сформированы. Проверьте данные: таблицу характеристик можно "
-        "отредактировать и нажать «Пересчитать поля Битрикс24», затем отправить в CRM.",
+        "отредактировать и нажать «Пересчитать поля Битрикс24», затем отправить в CRM."
+    )
+    if map_note:
+        success_msg = f"{success_msg}\n{map_note}"
+    mapped_upd, b24_json_upd, state_val, status_upd, send_upd = _mapping_updates(
+        b24_fields, map_error, b24_json_path, success_msg
     )
 
     return (
@@ -221,7 +250,7 @@ def recompute_bitrix24_fields(edited_table, file):
         # Без LLM-нормализации map_pcb_to_bitrix24_fields использует статические справочники.
         logger.warning("LLM недоступен для нормализации, используется fallback на справочники: %s", e)
 
-    b24_fields, map_error = _map_fields_safely(pcb_data, llm)
+    b24_fields, map_error, map_note = _map_fields_safely(pcb_data, llm)
 
     if file is not None:
         _, csv_path, xlsx_path, json_path, b24_json_path = _write_result_files(
@@ -234,11 +263,11 @@ def recompute_bitrix24_fields(edited_table, file):
         b24_json_path = None
         csv_upd, xlsx_upd, json_upd = gr.update(), gr.update(), gr.update()
 
+    success_msg = "✅ Поля Битрикс24 пересчитаны по отредактированным данным. Можно отправлять."
+    if map_note:
+        success_msg = f"{success_msg}\n{map_note}"
     mapped_upd, b24_json_upd, state_val, status_upd, send_upd = _mapping_updates(
-        b24_fields,
-        map_error,
-        b24_json_path,
-        "✅ Поля Битрикс24 пересчитаны по отредактированным данным. Можно отправлять.",
+        b24_fields, map_error, b24_json_path, success_msg
     )
 
     return (

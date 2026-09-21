@@ -1,13 +1,14 @@
 # -*- coding: utf-8 -*-
 """
-Юнит-тесты маппинга в поля Битрикс24. Работают офлайн: без API-ключа,
-без webhook, без сети (обращения к порталу подменяются заглушкой).
+Юнит-тесты маппинга в поля Битрикс24 и обработки ошибок Mistral API.
+Работают офлайн: без API-ключа, без webhook, без сети (обращения к порталу
+и к LLM подменяются заглушками).
 
 Запуск из корня проекта:
     python tests/run_unit_tests.py
 
 Код возврата 0 — все проверки пройдены. Прогоняйте после правок
-pcb_normalizer.py, bitrix24.py и справочников.
+pcb_normalizer.py, bitrix24.py, справочников и ретраев в utils.py.
 """
 import os
 import sys
@@ -222,6 +223,266 @@ except ValueError:
 section("11. Токен webhook маскируется в логах")
 check("токен скрыт", b._mask_webhook_url("https://x.bitrix24.ru/rest/6/s3cr3t/crm.item.add"),
       "https://x.bitrix24.ru/rest/6/***/crm.item.add")
+
+# ─────────────────────────────────────────────────────────────────
+section("12. Ошибки Mistral: тип по HTTP-статусу, отдельные повторы при 429")
+import time as _time  # noqa: E402
+from app import utils  # noqa: E402
+from app.model import PCBCharacteristics  # noqa: E402
+
+RATE_LIMIT_BODY = '{"object":"error","message":"Rate limit exceeded","type":"rate_limited","code":"1300"}'
+
+
+def http_error(status, headers=None, body=RATE_LIMIT_BODY):
+    """httpx.HTTPStatusError в том виде, в каком его бросает langchain_mistralai."""
+    req = httpx.Request("POST", "https://api.mistral.ai/v1/chat/completions")
+    resp = httpx.Response(status, headers=headers or {}, text=body, request=req)
+    return httpx.HTTPStatusError(f"Error response {status} while fetching {req.url}: {body}",
+                                 request=req, response=resp)
+
+
+class FakeParser:
+    """Заглушка LLM: по очереди бросает исключения / возвращает результаты."""
+
+    def __init__(self, *outcomes):
+        self.outcomes = list(outcomes)
+        self.calls = 0
+
+    def invoke(self, messages, **kwargs):
+        self.calls += 1
+        out = self.outcomes.pop(0)
+        if isinstance(out, BaseException):
+            raise out
+        return out
+
+
+def run_parser(parser, **kw):
+    """(имя исключения | результат, список пауз) — паузы перехватываются, не спим."""
+    sleeps = []
+    real_sleep = _time.sleep
+    _time.sleep = lambda s: sleeps.append(s)
+    try:
+        return utils.process_excel_pcb_with_retry("x", parser, **kw), sleeps
+    except Exception as e:
+        return e, sleeps
+    finally:
+        _time.sleep = real_sleep
+
+
+# Классификация
+check("429 → лимит запросов", utils.is_rate_limit_error(http_error(429)), True)
+check("401 → не лимит", utils.is_rate_limit_error(http_error(401)), False)
+check("401 → не сеть (сервер ответил)", utils.is_network_error(http_error(401)), False)
+check("ConnectError → сеть", utils.is_network_error(httpx.ConnectError("boom")), True)
+check("WinError 10054 в тексте → сеть",
+      utils.is_network_error(Exception("[WinError 10054] Удаленный хост принудительно разорвал подключение")), True)
+validation_err = ValueError("layer_count: Input should be int, input_value='ГОСТ Р 53429-2009'")
+check("«53429» в ошибке валидации — не лимит", utils.is_rate_limit_error(validation_err), False)
+check("«53429» в ошибке валидации — не сеть", utils.is_network_error(validation_err), False)
+check("Retry-After в секундах", utils.retry_after_seconds(http_error(429, {"Retry-After": "7"})), 7.0)
+check("Retry-After отсутствует", utils.retry_after_seconds(http_error(429)), None)
+check("заголовки лимитов в логе",
+      utils.rate_limit_headers(http_error(429, {"x-ratelimitbysize-remaining-minute": "0",
+                                                "content-type": "application/json"})),
+      {"x-ratelimitbysize-remaining-minute": "0"})
+
+OK = PCBCharacteristics(board_name="T-1")
+
+# 429 дважды, затем успех: паузы 5 → max(10, Retry-After 12)
+result, sleeps = run_parser(FakeParser(http_error(429), http_error(429, {"Retry-After": "12"}), OK),
+                            rate_limit_attempts=5, rate_limit_delay=5.0)
+check("после двух 429 — успех", getattr(result, "get", lambda k: result)("board_name"), "T-1")
+check("паузы 5 → max(10, Retry-After 12)", sleeps, [5.0, 12.0])
+
+# 429 на всех попытках
+parser = FakeParser(*[http_error(429)] * 3)
+result, sleeps = run_parser(parser, rate_limit_attempts=3, rate_limit_delay=5.0)
+check("429 на всех попытках → MistralRateLimitError", type(result).__name__, "MistralRateLimitError")
+check("попыток ровно 3", parser.calls, 3)
+check("паузы 5 → 10", sleeps, [5.0, 10.0])
+check("HTTP-статус виден через причину", utils.http_status_of(result), 429)
+
+# Сервер просит ждать дольше потолка — сдаёмся сразу, не спим
+parser = FakeParser(http_error(429, {"Retry-After": "600"}), OK)
+result, sleeps = run_parser(parser, rate_limit_attempts=5)
+check("Retry-After 600 → сдаёмся сразу", type(result).__name__, "MistralRateLimitError")
+check("без ожидания", sleeps, [])
+
+# Ошибка валидации ответа модели: без повторов, пробрасывается как есть
+parser = FakeParser(validation_err)
+result, sleeps = run_parser(parser)
+check("ошибка валидации → как есть, без повторов", type(result).__name__, "ValueError")
+check("вызов один", parser.calls, 1)
+check("пауз нет", sleeps, [])
+
+# Сетевые сбои: прежняя короткая стратегия
+parser = FakeParser(httpx.ConnectError("boom"), httpx.ConnectError("boom"))
+result, sleeps = run_parser(parser, max_retries=2, delay=2.0)
+check("сеть на всех попытках → MistralNetworkError", type(result).__name__, "MistralNetworkError")
+check("сетевых попыток 2", parser.calls, 2)
+check("сетевая пауза 2", sleeps, [2.0])
+
+# 401: неповторяемая
+parser = FakeParser(http_error(401, body='{"message":"Unauthorized"}'))
+result, sleeps = run_parser(parser)
+check("401 → без повторов", parser.calls, 1)
+check("401 → статус", utils.http_status_of(result), 401)
+
+# ─────────────────────────────────────────────────────────────────
+section("13. Сообщение для пользователя: без двойной обёртки")
+from app import interface as ui  # noqa: E402
+
+rl = utils.MistralRateLimitError("Превышен лимит запросов Mistral API (HTTP 429): ...")
+check("лимит: текст как есть", ui._friendly_error_message(rl), str(rl))
+check("лимит: без префикса «Ошибка при обработке файла»",
+      ui._friendly_error_message(rl).startswith("Ошибка при обработке файла"), False)
+net = utils.MistralNetworkError("Ошибка сети при обращении к Mistral API: ...")
+check("сеть: текст как есть", ui._friendly_error_message(net), str(net))
+check("401 по статусу", "401 Unauthorized" in ui._friendly_error_message(http_error(401, body="x")), True)
+check("429 без ретраев (не из пайплайна)",
+      ui._friendly_error_message(http_error(429)), "Превышен лимит запросов Mistral API (HTTP 429). Попробуйте позже.")
+check("«53429» в тексте — обычная ошибка",
+      ui._friendly_error_message(validation_err).startswith("Ошибка при обработке файла"), True)
+check("«1401» в тексте — не 401",
+      "Unauthorized" in ui._friendly_error_message(ValueError("value 1401 is invalid")), False)
+
+# ─────────────────────────────────────────────────────────────────
+section("14. Промпт 2 (нормализация): 429 → короткий повтор, потом fallback")
+from types import SimpleNamespace  # noqa: E402
+from langchain_mistralai import ChatMistralAI  # noqa: E402
+
+NORMALIZED = '{"finish_type": "Imm. gold (chem.Ni/Au)", "copper_thickness": null, ' \
+             '"base_material": "FR4 TG-180", "pcb_type": null, "ipc_class": null}'
+MESSAGES = [{"role": "system", "content": "s"}, {"role": "user", "content": "u"}]
+
+
+def run_adapter(*outcomes):
+    """Подменяет ChatMistralAI.invoke: сеть не нужна. → (ответ | исключение, паузы)."""
+    queue = list(outcomes)
+    calls = []
+    sleeps = []
+    real_invoke, real_sleep = ChatMistralAI.invoke, _time.sleep
+
+    def fake_invoke(self, messages, *a, **kw):
+        calls.append(1)
+        out = queue.pop(0)
+        if isinstance(out, BaseException):
+            raise out
+        return SimpleNamespace(content=out)
+
+    ChatMistralAI.invoke = fake_invoke
+    _time.sleep = lambda s: sleeps.append(s)
+    os.environ["MISTRAL_API_KEY"] = "test-key"
+    try:
+        adapter = b._MistralChatAdapter(None)
+        try:
+            resp = adapter.chat("mistral-small-latest", MESSAGES, response_format={"type": "json_object"})
+            return resp.choices[0].message.content, len(calls), sleeps
+        except Exception as e:
+            return e, len(calls), sleeps
+    finally:
+        ChatMistralAI.invoke, _time.sleep = real_invoke, real_sleep
+        os.environ.pop("MISTRAL_API_KEY", None)
+
+
+content, calls, sleeps = run_adapter(http_error(429), NORMALIZED)
+check("429, затем ответ", content, NORMALIZED)
+check("вызовов 2", calls, 2)
+check("пауза 5", sleeps, [5.0])
+
+result, calls, sleeps = run_adapter(*[http_error(429)] * 3)
+check("3×429 → MistralRateLimitError (уйдёт в fallback)", type(result).__name__, "MistralRateLimitError")
+check("вызовов 3", calls, 3)
+check("паузы 5 → 10", sleeps, [5.0, 10.0])
+
+result, calls, sleeps = run_adapter(http_error(429, {"Retry-After": "45"}), NORMALIZED)
+check("Retry-After 45 > потолка 20 → сразу fallback", type(result).__name__, "MistralRateLimitError")
+check("без ожидания", sleeps, [])
+
+# Полный путь: нормализация упала → поля Битрикс24 всё равно сформированы
+real_invoke = ChatMistralAI.invoke
+ChatMistralAI.invoke = lambda self, m, *a, **kw: (_ for _ in ()).throw(http_error(429))
+_time.sleep, real_sleep = (lambda s: None), _time.sleep
+os.environ["MISTRAL_API_KEY"] = "test-key"
+try:
+    fields = b.map_pcb_to_bitrix24_fields(
+        {"board_name": "T-2", "board_thickness": "1.6", "base_material": "FR4 TG-180",
+         "coverage_type": "ENIG"}, mistral_client=b._MistralChatAdapter(None))
+finally:
+    ChatMistralAI.invoke, _time.sleep = real_invoke, real_sleep
+    os.environ.pop("MISTRAL_API_KEY", None)
+check("fallback: OEM PN", fields.get("ufCrm24_1709799376061"), "T-2")
+check("fallback: материал из dicts.*, не MIX/Others", fields.get("ufCrm24_1707838248"), 5774)
+
+# ─────────────────────────────────────────────────────────────────
+section("15. Модели из окружения и лог расхода токенов")
+from langchain_core.outputs import LLMResult  # noqa: E402
+
+for var in ("MISTRAL_MODEL_PARSE", "MISTRAL_MODEL_NORMALIZE"):
+    os.environ.pop(var, None)
+check("Промпт 1 по умолчанию", utils.get_parse_model(), "mistral-medium-latest")
+check("Промпт 2 по умолчанию", pn.get_normalize_model(), "mistral-small-latest")
+os.environ["MISTRAL_MODEL_PARSE"] = "ministral-14b-2512"
+os.environ["MISTRAL_MODEL_NORMALIZE"] = "ministral-8b-2512"
+check("Промпт 1 из env", utils.get_parse_model(), "ministral-14b-2512")
+check("Промпт 2 из env", pn.get_normalize_model(), "ministral-8b-2512")
+# create_pcb_model: env → ChatMistralAI.model (сеть не нужна: без proxy пробы нет)
+os.environ.pop("HTTPS_PROXY", None)
+os.environ.pop("HTTP_PROXY", None)
+parser_runnable = utils.create_pcb_model({"api_key": "test-key"})
+check("create_pcb_model берёт модель из env", parser_runnable.first.bound.model, "ministral-14b-2512")
+parser_runnable = utils.create_pcb_model({"api_key": "test-key", "model": "mistral-large-2512"})
+check("params['model'] приоритетнее env", parser_runnable.first.bound.model, "mistral-large-2512")
+for var in ("MISTRAL_MODEL_PARSE", "MISTRAL_MODEL_NORMALIZE"):
+    os.environ.pop(var, None)
+
+usage_logger = utils.TokenUsageLogger("t")
+usage_logger.on_llm_end(LLMResult(generations=[[]], llm_output={
+    "token_usage": {"prompt_tokens": 4300, "completion_tokens": 250, "total_tokens": 4550},
+    "model_name": "mistral-large-2512"}))
+check("usage из ответа", usage_logger.last,
+      {"prompt_tokens": 4300, "completion_tokens": 250, "total_tokens": 4550})
+usage_logger = utils.TokenUsageLogger("t")
+usage_logger.on_llm_end(LLMResult(generations=[[]], llm_output=None))
+check("ответ без usage — без падения", usage_logger.last, None)
+
+# ─────────────────────────────────────────────────────────────────
+section("16. Ограничения тарифа: нулевой лимит и 403 — без бесполезных повторов")
+ZERO = {"x-ratelimit-limit-req-minute": "0", "x-ratelimit-remaining-req-minute": "0"}
+check("нулевой лимит распознан", utils.rate_limit_is_zero(http_error(429, ZERO)), True)
+check("обычный 429 — не нулевой", utils.rate_limit_is_zero(http_error(429, {"Retry-After": "3"})), False)
+parser = FakeParser(http_error(429, ZERO), OK)
+result, sleeps = run_parser(parser, rate_limit_attempts=5)
+check("нулевой лимит → сразу MistralRateLimitError", type(result).__name__, "MistralRateLimitError")
+check("без повторов и пауз", (parser.calls, sleeps), (1, []))
+check("в сообщении — подсказка про модель/тариф", "MISTRAL_MODEL_PARSE" in str(result), True)
+check("UI: текст как есть", ui._friendly_error_message(result), str(result))
+
+tier = http_error(403, body='{"object":"error","message":"This model is not available in your subscription tier","type":"tier_not_allowed"}')
+check("403 tier_not_allowed распознан", utils.is_tier_error(tier), True)
+check("403 без tier — не тарифная", utils.is_tier_error(http_error(403, body='{"message":"Forbidden"}')), False)
+parser = FakeParser(tier)
+result, sleeps = run_parser(parser)
+check("403 → без повторов", parser.calls, 1)
+check("UI: сообщение про тариф", "тарифе" in ui._friendly_error_message(result), True)
+
+# Промпт 2 упал → маппинг по справочникам + причина в diagnostics для статуса UI
+real_invoke = ChatMistralAI.invoke
+ChatMistralAI.invoke = lambda self, m, *a, **kw: (_ for _ in ()).throw(http_error(429, ZERO))
+os.environ["MISTRAL_API_KEY"] = "test-key"
+diag = {}
+try:
+    fields = b.map_pcb_to_bitrix24_fields(
+        {"board_name": "T-3", "board_thickness": "1.6", "base_material": "FR4 TG-180"},
+        mistral_client=b._MistralChatAdapter(None), diagnostics=diag)
+finally:
+    ChatMistralAI.invoke = real_invoke
+    os.environ.pop("MISTRAL_API_KEY", None)
+check("fallback: поля сформированы", fields.get("ufCrm24_1707838248"), 5774)
+check("diagnostics: причина записана", "тарифе" in diag.get("normalization_error", ""), True)
+fields2, err2, note2 = ui._map_fields_safely(
+    {"board_name": "T-3", "board_thickness": "1.6", "base_material": "FR4 TG-180"}, None)
+check("без LLM-клиента: заметки нет", (err2, note2), (None, None))
 
 # ─────────────────────────────────────────────────────────────────
 print("\n" + "=" * 64)

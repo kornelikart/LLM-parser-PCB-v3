@@ -17,7 +17,7 @@
 или {"value": ..., "soft": true}.
 
 Запуск из корня проекта:
-    python eval/run_llm_eval.py [--only ПОДСТРОКА_ИМЕНИ] [--sleep 2.0]
+    python eval/run_llm_eval.py [--only ПОДСТРОКА_ИМЕНИ] [--sleep 5.0]
 
 Фактические ответы LLM сохраняются в eval/results/llm_<метка времени>/.
 """
@@ -78,8 +78,9 @@ def check_matcher(actual, matcher: dict) -> bool:
 def main() -> int:
     parser = argparse.ArgumentParser(description="LLM-eval пайплайна распознавания ПП")
     parser.add_argument("--only", default="", help="фильтр по подстроке имени файла")
-    parser.add_argument("--sleep", type=float, default=2.0,
-                        help="пауза между файлами, сек (бережём rate limit)")
+    parser.add_argument("--sleep", type=float, default=5.0,
+                        help="пауза между файлами, сек: на файл уходит 2 запроса к Mistral, "
+                             "а квота тарифа поминутная")
     args = parser.parse_args()
 
     results_dir = EVAL_DIR / "results" / f"llm_{datetime.now():%Y%m%d_%H%M%S}"

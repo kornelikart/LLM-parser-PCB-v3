@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
 from typing import Any, Optional
 
@@ -11,6 +12,14 @@ except ImportError:
     from .bitrix24_api import get_bitrix24_api
 
 logger = logging.getLogger(__name__)
+
+# Модель Промпта 2. Лимит TPM считается по каждой модели (см. utils.get_parse_model).
+DEFAULT_NORMALIZE_MODEL = "mistral-small-latest"
+
+
+def get_normalize_model() -> str:
+    """Модель Промпта 2 (нормализация): MISTRAL_MODEL_NORMALIZE или DEFAULT_NORMALIZE_MODEL."""
+    return (os.getenv("MISTRAL_MODEL_NORMALIZE") or "").strip() or DEFAULT_NORMALIZE_MODEL
 
 # ═══════════════════════════════════════════════════════════════════
 # КАНОНИЧЕСКИЕ СПРАВОЧНИКИ
@@ -473,14 +482,18 @@ def normalize_pcb_data(raw: dict[str, Any], mistral_client: Any) -> dict[str, An
     Возвращает обогащённый словарь:
       - все исходные поля raw сохранены
       - добавлен ключ "_normalized": {finish_type, copper_thickness, base_material, pcb_type}
+      - если LLM не ответил (429, сеть, невалидный JSON) — "_normalized" пустой и
+        добавлен ключ "_normalization_error" с текстом ошибки: вызывающий код
+        может уйти в fallback вместо маппинга по пустым значениям
 
     После этого вызывайте map_to_bitrix24_ids() для получения item_id.
     """
     prompt = _build_normalization_prompt(raw)
+    error: Optional[str] = None
 
     try:
         response = mistral_client.chat(
-            model="mistral-small-latest",
+            model=get_normalize_model(),
             messages=[
                 {"role": "system", "content": _NORMALIZATION_SYSTEM},
                 {"role": "user",   "content": prompt},
@@ -497,14 +510,19 @@ def normalize_pcb_data(raw: dict[str, Any], mistral_client: Any) -> dict[str, An
     except json.JSONDecodeError as e:
         logger.error("Ошибка парсинга JSON от LLM нормализатора: %s | content: %.200s", e, locals().get("content", ""))
         normalized = {}
+        error = f"невалидный JSON от LLM: {e}"
     except Exception as e:
         logger.error("Ошибка нормализации через LLM: %s", e)
         normalized = {}
+        error = str(e)
 
     _validate_normalized(normalized)
     _log_normalization_diffs(raw, normalized)
 
-    return {**raw, "_normalized": normalized}
+    enriched = {**raw, "_normalized": normalized}
+    if error:
+        enriched["_normalization_error"] = error
+    return enriched
 
 
 def _validate_normalized(normalized: dict) -> None:
