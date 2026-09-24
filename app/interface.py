@@ -25,6 +25,13 @@ _EDIT_HINT = (
     "чтобы обновить поля перед отправкой."
 )
 
+# Типы файлов для загрузки. Браузерная часть Gradio 5 сверяет расширение со списком
+# с учётом регистра, и «Бланк заказа.XLSX» отклонялся с «Invalid file type»;
+# поэтому заглавные варианты перечислены явно. Сервер Gradio и extract_document_data
+# регистр не учитывают.
+_UPLOAD_EXTENSIONS = [".xlsx", ".xls", ".docx", ".doc", ".txt"]
+UPLOAD_FILE_TYPES = _UPLOAD_EXTENSIONS + [ext.upper() for ext in _UPLOAD_EXTENSIONS]
+
 
 def _file_basename(file):
     """Имя файла без расширения для сохранения результатов."""
@@ -406,7 +413,7 @@ def create_interface(title: str = "gradio app"):
                 )
                 excel_input = gr.File(
                     label="Загрузить файл спецификации (Excel, Word или txt)",
-                    file_types=[".xlsx", ".xls", ".docx", ".doc", ".txt"],
+                    file_types=UPLOAD_FILE_TYPES,
                     height=140
                 )
                 excel_process_btn = gr.Button(

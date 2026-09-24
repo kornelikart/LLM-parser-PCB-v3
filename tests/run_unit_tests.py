@@ -577,6 +577,26 @@ finally:
     utils.create_pcb_model, utils.process_excel_pcb_with_retry = real_create, real_process
 
 # ─────────────────────────────────────────────────────────────────
+section("18. Расширение в верхнем регистре: «Бланк заказа.XLSX» принимается")
+demo = ui.create_interface()
+upload = [blk for blk in demo.blocks.values()
+          if isinstance(blk, gr.File) and blk.file_types and ".xlsx" in blk.file_types]
+check("компонент загрузки найден", len(upload), 1)
+types = upload[0].file_types if upload else []
+for name in ("Бланк заказа ПП САНТ.758726.291.XLSX", "spec.XLS", "ЛТТ.DOCX", "old.DOC", "note.TXT",
+             "spec.xlsx", "ЛТТ.docx"):
+    # та же проверка, что в браузерной части Gradio: "." + всё после последней точки
+    check(f"интерфейс принимает {name}", "." + name.split(".")[-1] in types, True)
+check("неподдерживаемый .pdf по-прежнему не принимается", ".pdf" in types or ".PDF" in types, False)
+
+(FILES / "ok.TXT").write_text("Толщина платы, мм | 1,6", encoding="utf-8")
+wb = openpyxl.Workbook()
+wb.active["A1"], wb.active["B1"] = "Толщина платы, мм", "1,6"
+wb.save(FILES / "form.XLSX")
+check("extract_document_data: .TXT", "1,6" in utils.extract_document_data(str(FILES / "ok.TXT")), True)
+check("extract_document_data: .XLSX", "1,6" in utils.extract_document_data(str(FILES / "form.XLSX")), True)
+
+# ─────────────────────────────────────────────────────────────────
 print("\n" + "=" * 64)
 if FAILS:
     print(f"ПРОВАЛЕНО: {len(FAILS)}")
