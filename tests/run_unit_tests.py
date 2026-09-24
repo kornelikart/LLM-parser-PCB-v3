@@ -485,6 +485,98 @@ fields2, err2, note2 = ui._map_fields_safely(
 check("без LLM-клиента: заметки нет", (err2, note2), (None, None))
 
 # ─────────────────────────────────────────────────────────────────
+section("17. Файлы без текста и нечитаемые: понятная ошибка, в LLM не отправляются")
+import gradio as gr  # noqa: E402
+import openpyxl  # noqa: E402
+from docx import Document as DocxDocument  # noqa: E402
+
+FILES = Path(tempfile.mkdtemp())
+
+
+def read_error(path):
+    """Текст DocumentReadError; None — файл прочитан; другое исключение — провал."""
+    try:
+        utils.extract_document_data(str(path))
+        return None
+    except utils.DocumentReadError as e:
+        return str(e)
+    except Exception as e:  # noqa: BLE001
+        return f"ДРУГАЯ ОШИБКА {type(e).__name__}: {e}"
+
+
+(FILES / "empty.txt").write_bytes(b"")
+(FILES / "spaces.txt").write_text("  \n\t  ", encoding="utf-8")
+DocxDocument().save(FILES / "empty.docx")
+openpyxl.Workbook().save(FILES / "empty.xlsx")
+(FILES / "broken.xlsx").write_bytes(os.urandom(2048))
+(FILES / "broken.docx").write_bytes(os.urandom(2048))
+(FILES / "html_as.xls").write_bytes(b"<html><body><table><tr><td>1</td></tr></table></body></html>")
+(FILES / "spec.pdf").write_bytes(b"%PDF-1.4\n")
+(FILES / "ok.txt").write_text("Толщина платы, мм | 1,6", encoding="utf-8")
+
+for name in ("empty.txt", "spaces.txt", "empty.docx", "empty.xlsx"):
+    msg = read_error(FILES / name) or ""
+    check(f"{name}: «нет текста» с именем файла", "нет текста" in msg and name in msg, True)
+for name, app in (("broken.xlsx", "Excel"), ("broken.docx", "Word"), ("html_as.xls", "Excel")):
+    msg = read_error(FILES / name) or ""
+    check(f"{name}: «не удалось прочитать», совет открыть в {app}",
+          msg.startswith("Не удалось прочитать") and f"в {app}" in msg, True)
+check("broken.xlsx: без технического текста pandas",
+      "engine manually" in (read_error(FILES / "broken.xlsx") or ""), False)
+check("broken.docx: без «Package not found»",
+      "Package not found" in (read_error(FILES / "broken.docx") or ""), False)
+check("spec.pdf: формат не поддерживается",
+      "не поддерживается" in (read_error(FILES / "spec.pdf") or ""), True)
+check("ok.txt: читается", read_error(FILES / "ok.txt"), None)
+check("UI: текст ошибки файла как есть", ui._friendly_error_message(utils.DocumentReadError("X")), "X")
+
+# Весь путь через обработчик кнопки «Распознать»: LLM подменён счётчиком вызовов
+calls = []
+llm_answer = {}
+real_create, real_process = utils.create_pcb_model, utils.process_excel_pcb_with_retry
+
+
+def fake_process(*args, **kwargs):
+    calls.append("process")
+    return {**PCBCharacteristics().model_dump(), **llm_answer}
+
+
+def run_ui(path):
+    """(сообщение gr.Error | None, результат обработчика, число обращений к LLM)."""
+    calls.clear()
+    try:
+        return None, ui.parse_excel_pcb(str(path)), len(calls)
+    except gr.Error as e:
+        return e.message, None, len(calls)
+
+
+utils.create_pcb_model = lambda params: calls.append("create") or object()
+utils.process_excel_pcb_with_retry = fake_process
+os.environ.pop("MISTRAL_API_KEY", None)  # нормализация не должна уйти в сеть
+try:
+    msg, _, n = run_ui(FILES / "empty.txt")
+    check("пустой файл: ошибка, в LLM не отправлен", ("нет текста" in (msg or ""), n), (True, 0))
+    msg, _, n = run_ui(FILES / "broken.xlsx")
+    check("битый .xlsx: ошибка без префикса, в LLM не отправлен",
+          ((msg or "").startswith("Не удалось прочитать"), n), (True, 0))
+
+    (FILES / "letter.txt").write_text("Добрый день! Высылаю счёт за июль.", encoding="utf-8")
+    llm_answer = {}
+    msg, _, n = run_ui(FILES / "letter.txt")
+    check("не спецификация: «не найдено характеристик»",
+          ("не найдено характеристик" in (msg or ""), n), (True, 2))
+    llm_answer = {"company_name": "ООО Ромашка", "technological_fields": "No", "impedance_control": "нет"}
+    msg, _, n = run_ui(FILES / "letter.txt")
+    check("только заказчик и «нет» — тоже не спецификация", "не найдено характеристик" in (msg or ""), True)
+    llm_answer = {"board_name": "T-17", "board_thickness": "1.6", "base_material": "FR4",
+                  "coverage_type": "ENIG", "layer_count": 4}
+    msg, result, n = run_ui(FILES / "ok.txt")
+    status = str(((result or [None] * 8)[7] or {}).get("value", ""))
+    check("спецификация: без ошибки, поля Битрикс24 сформированы", (msg, status.startswith("✅")), (None, True))
+finally:
+    utils.create_pcb_model, utils.process_excel_pcb_with_retry = real_create, real_process
+
+# ─────────────────────────────────────────────────────────────────
 print("\n" + "=" * 64)
 if FAILS:
     print(f"ПРОВАЛЕНО: {len(FAILS)}")

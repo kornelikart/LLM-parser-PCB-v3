@@ -254,27 +254,70 @@ def extract_word97_data(file) -> str:
         logger.info(".doc: текст извлечён через OLE-парсинг.")
         return text
 
-    raise RuntimeError(
-        "Не удалось прочитать .doc файл. Пожалуйста, пересохраните документ как .docx в Microsoft Word."
+    raise DocumentReadError(
+        f"Не удалось прочитать файл «{os.path.basename(path)}» (Word 97–2003): он повреждён, "
+        "пустой или сохранён в другом формате. Пересохраните документ в Microsoft Word как .docx."
     )
 
 
+class DocumentReadError(ValueError):
+    """Файл нельзя передать в LLM: формат не поддерживается, файл не читается или
+    в нём нет текста. Сообщение адресовано пользователю и показывается как есть."""
+
+
+# Программа, в которой нечитаемый файл стоит открыть и пересохранить.
+_APP_BY_EXT = {
+    ".docx": "Word", ".doc": "Word",
+    ".xlsx": "Excel", ".xlsm": "Excel", ".xls": "Excel",
+    ".txt": "текстовом редакторе",
+}
+
+
 def extract_document_data(file) -> str:
-    """Извлекает текст из Excel, Word или txt по расширению файла."""
+    """Извлекает текст из Excel, Word или txt по расширению файла.
+
+    Файл без текста (пустой, скан) и нечитаемый файл (повреждён, защищён паролем,
+    содержимое не соответствует расширению) отклоняются здесь, до запроса к LLM:
+    раньше пустой документ тратил запрос, а пользователь видел «Характеристики
+    распознаны» над пустой таблицей или технический текст pandas / python-docx.
+
+    Raises:
+        DocumentReadError: с сообщением для пользователя; подробности — в логе.
+    """
     path = _get_file_path(file)
-    path_lower = path.lower()
-    if path_lower.endswith(".docx"):
-        text = extract_word_data(file)
-    elif path_lower.endswith(".doc"):
-        text = extract_word97_data(file)
-    elif path_lower.endswith((".xlsx", ".xlsm", ".xls")):
-        text = extract_excel_data(file)
-    elif path_lower.endswith(".txt"):
-        text = extract_text_data(file)
-    else:
-        raise ValueError(
-            "Неподдерживаемый формат. Используйте файл .xlsx, .xls, .docx, .doc или .txt "
-            "(Лист технических требований ПП / бланк заказа)."
+    name = os.path.basename(path)
+    ext = os.path.splitext(path)[1].lower()
+    extractors = {
+        ".docx": extract_word_data,
+        ".doc": extract_word97_data,
+        ".xlsx": extract_excel_data,
+        ".xlsm": extract_excel_data,
+        ".xls": extract_excel_data,
+        ".txt": extract_text_data,
+    }
+    extractor = extractors.get(ext)
+    if extractor is None:
+        raise DocumentReadError(
+            f"Формат файла «{name}» не поддерживается. Используйте .xlsx, .xls, .docx, .doc "
+            "или .txt (лист технических требований ПП / бланк заказа)."
+        )
+    try:
+        text = extractor(file)
+    except DocumentReadError:
+        raise
+    except Exception as e:
+        logger.error("Не удалось прочитать файл %s: %s: %s", name, type(e).__name__, e)
+        raise DocumentReadError(
+            f"Не удалось прочитать файл «{name}»: он повреждён, защищён паролем или его "
+            f"содержимое не соответствует расширению {ext}. Откройте файл в "
+            f"{_APP_BY_EXT[ext]} и сохраните заново. Подробности — в логе приложения (logs.log)."
+        ) from e
+    if not (text or "").strip():
+        logger.warning("В файле %s нет текста — в LLM не отправляется.", name)
+        raise DocumentReadError(
+            f"В файле «{name}» нет текста: он пустой или содержит только изображения "
+            "(например, скан). Загрузите лист технических требований ПП или бланк заказа "
+            "в текстовом виде."
         )
     return _truncate_for_llm(text)
 

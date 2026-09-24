@@ -1,4 +1,5 @@
 import json
+import os
 import re
 
 import gradio as gr
@@ -32,12 +33,12 @@ def _file_basename(file):
 
 
 def _friendly_error_message(e) -> str:
-    """Переводит технические ошибки Mistral/сети в сообщение для пользователя.
+    """Переводит технические ошибки (файл, Mistral, сеть) в сообщение для пользователя.
 
     Тип ошибки определяется по классу исключения и HTTP-статусу, а не по подстроке:
     в тексте ошибки бывают данные документа («ГОСТ Р 53429-2009» — это не HTTP 429).
     """
-    if isinstance(e, (utils.MistralRateLimitError, utils.MistralNetworkError)):
+    if isinstance(e, (utils.MistralRateLimitError, utils.MistralNetworkError, utils.DocumentReadError)):
         return str(e)  # текст уже сформулирован для пользователя — без второй обёртки
     msg = str(e)
     status = utils.http_status_of(e)
@@ -168,11 +169,29 @@ def _mapping_updates(b24_fields, map_error, b24_json_path, success_msg):
     )
 
 
+# Поля, которые сами по себе не делают документ спецификацией платы: заказчика,
+# обозначение и количество LLM находит и в письмах, счетах, сопроводительных записках.
+_NON_TECHNICAL_FIELDS = {"company_name", "board_name", "quantity"}
+# Значения, которыми LLM заполняет поле, когда данных нет.
+_EMPTY_VALUES = {"", "0", "none", "null", "n/a", "-", "—", "no", "нет"}
+
+
+def _has_pcb_characteristics(parsed: dict) -> bool:
+    """Нашёл ли LLM в документе хоть одну техническую характеристику платы."""
+    return any(
+        str(value if value is not None else "").strip().casefold() not in _EMPTY_VALUES
+        for key, value in parsed.items()
+        if key not in _NON_TECHNICAL_FIELDS
+    )
+
+
 def parse_excel_pcb(file):
     """
     Извлекает данные из загруженного файла (Excel или Word), распознаёт характеристики
     через LLM и формирует поля Битрикс24. Ошибка маппинга не скрывает распознанное:
     таблица характеристик показывается всегда, а статус подсказывает, что исправить.
+    Файл без текста или нечитаемый отклоняется до запроса к LLM; документ, в котором
+    LLM не нашёл характеристик платы (письмо, счёт), — понятной ошибкой, а не пустой таблицей.
     """
     if isinstance(file, list) and file:
         file = file[0]
@@ -194,6 +213,17 @@ def parse_excel_pcb(file):
     except Exception as e:
         logger.error("An error occurred while parsing the file: %s", e)
         raise gr.Error(_friendly_error_message(e))
+
+    # Документ прочитан, но это не спецификация: пустая таблица с «Характеристики
+    # распознаны» только запутала бы пользователя.
+    if not _has_pcb_characteristics(parsed_dict):
+        name = os.path.basename(getattr(file, "name", None) or str(file))
+        found = {k: v for k, v in parsed_dict.items() if v not in ("", 0, None)}
+        logger.warning("В документе %s не найдено характеристик ПП (распознано: %s)", name, found)
+        raise gr.Error(
+            f"В документе «{name}» не найдено характеристик печатной платы. Проверьте, что "
+            "загружен лист технических требований ПП или бланк заказа."
+        )
 
     # Шаг 2: маппинг в поля Битрикс24 (LLM промпт 2 + справочники).
     b24_fields, map_error, map_note = _map_fields_safely(parsed_dict, llm)
